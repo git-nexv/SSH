@@ -56,8 +56,9 @@ This installs the engine and registers the command `nexv`.
    - **SSH username** (press Enter for `root`)
    - **IP list file** (e.g. `ip.txt`)
    - **Password list file** (e.g. `password.txt`)
-   - **How many servers to check at the same time** — higher = faster. Default
-     is all of them at once; as each server finishes, the next one starts.
+   - **How many servers to check at the same time** — higher = faster, no cap.
+     The default is *all* of them at once (even hundreds); as each server
+     finishes, the next one starts. Lower it only if you hit rate-limiting.
    - **How many retries when a server times out / won't connect** (default `3`)
      — a server that resets or times out is retried this many times (with
      backoff) before being marked unreachable.

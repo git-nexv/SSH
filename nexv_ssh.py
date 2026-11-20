@@ -70,13 +70,15 @@ if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
 # Default connection tuning (override with env vars)
 #   NEXV_TIMEOUT  - per-attempt connect/auth timeout, seconds (default 4)
 #   NEXV_PROBE    - fast TCP port-probe timeout, seconds   (default min(timeout,2))
-#   NEXV_WORKERS  - max servers scanned in parallel        (default 100)
+#   NEXV_WORKERS  - default parallel servers (default: all of them, no cap)
 #   NEXV_RETRIES  - retries on a transient error (reset/timeout) (default 3)
 #   NEXV_DELAY    - seconds to wait between attempts on one host (default 0)
 CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "4"))
 AUTH_TIMEOUT = CONNECT_TIMEOUT
 PROBE_TIMEOUT = float(os.environ.get("NEXV_PROBE", str(min(CONNECT_TIMEOUT, 2))))
-MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "100"))
+# No artificial cap: default to as many parallel workers as there are servers.
+# (More workers than servers is pointless, so the effective max is the IP count.)
+MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "1000000"))
 RETRIES = int(os.environ.get("NEXV_RETRIES", "3"))
 INTER_DELAY = float(os.environ.get("NEXV_DELAY", "0"))
 RETRY_UNREACHABLE = 1      # consecutive hard failures before marking a host down
@@ -789,11 +791,12 @@ def run_fresh():
         log(C.DIM + "Skipped {} duplicate password(s) in {}.".format(pw_dups, pw_file) + C.END)
 
     # How many servers to check at the same time. More = faster (as each server
-    # finishes, the next one starts automatically). Default: all of them at once.
+    # finishes, the next one starts automatically). No cap: the default is all of
+    # them at once (equal to the number of servers).
     default_workers = min(MAX_WORKERS, len(ips))
     workers = ask_int(
-        "How many servers to check at the same time", default_workers,
-        lo=1, hi=len(ips))
+        "How many servers to check at the same time (max {} = all)".format(len(ips)),
+        default_workers, lo=1, hi=len(ips))
 
     # How many times to retry a server that times out / won't connect before
     # giving up on it.
