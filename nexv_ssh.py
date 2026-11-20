@@ -332,22 +332,27 @@ def ask(prompt, default=None):
 
 
 def load_lines(path):
-    """Load non-empty, de-duplicated lines preserving order."""
+    """Load non-empty, de-duplicated lines preserving order.
+
+    Returns (items, duplicates_skipped).
+    """
     if not os.path.isfile(path):
         log(C.R + "[!] File not found: {}".format(path) + C.END)
         sys.exit(1)
     seen = set()
     out = []
+    dups = 0
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
             if line in seen:
+                dups += 1
                 continue
             seen.add(line)
             out.append(line)
-    return out
+    return out, dups
 
 
 def host_is_open(host, port, timeout):
@@ -697,14 +702,18 @@ def run_fresh():
     ip_file = ask("IP list file (one IP per line)", "ip.txt")
     pw_file = ask("Password list file (one password per line)", "password.txt")
 
-    ips = load_lines(ip_file)
-    passwords = load_lines(pw_file)
+    ips, ip_dups = load_lines(ip_file)
+    passwords, pw_dups = load_lines(pw_file)
     if not ips:
         log(C.R + "[!] No IPs found in {}".format(ip_file) + C.END)
         sys.exit(1)
     if not passwords:
         log(C.R + "[!] No passwords found in {}".format(pw_file) + C.END)
         sys.exit(1)
+    if ip_dups:
+        log(C.DIM + "Skipped {} duplicate IP(s) in {}.".format(ip_dups, ip_file) + C.END)
+    if pw_dups:
+        log(C.DIM + "Skipped {} duplicate password(s) in {}.".format(pw_dups, pw_file) + C.END)
 
     # How many servers to check at the same time. More = faster (as each server
     # finishes, the next one starts automatically). Default: all of them at once.
@@ -768,8 +777,8 @@ def run_resume():
             log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv start" + C.END)
             sys.exit(1)
 
-    ips = load_lines(ip_file)
-    passwords = load_lines(pw_file)
+    ips, _ = load_lines(ip_file)
+    passwords, _ = load_lines(pw_file)
     if not ips or not passwords:
         log(C.R + "[!] IP or password file is now empty." + C.END)
         sys.exit(1)
