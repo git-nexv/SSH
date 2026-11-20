@@ -61,10 +61,10 @@ class C:
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
     C.off()
 
-# Default connection tuning
-CONNECT_TIMEOUT = 8        # seconds for the TCP/SSH connection
-AUTH_TIMEOUT = 8           # seconds for each authentication attempt
-MAX_WORKERS = 15           # how many servers to test in parallel
+# Default connection tuning (override with env vars NEXV_WORKERS / NEXV_TIMEOUT)
+CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "6"))   # TCP/SSH connect timeout (s)
+AUTH_TIMEOUT = CONNECT_TIMEOUT                               # auth timeout (s)
+MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "100"))    # max servers in parallel (cap)
 RETRY_UNREACHABLE = 1      # retry count when the host times out / resets
 
 _print_lock = threading.Lock()
@@ -73,6 +73,76 @@ _print_lock = threading.Lock()
 def log(msg=""):
     with _print_lock:
         print(msg, flush=True)
+
+
+def _term_width():
+    try:
+        return max(40, shutil.get_terminal_size((100, 20)).columns)
+    except Exception:
+        return 100
+
+
+class Progress:
+    """Thread-safe live status line + permanent result lines."""
+
+    def __init__(self, total_ips, total_pw):
+        self.total_ips = total_ips
+        self.total_pw = total_pw
+        self.ips_done = 0
+        self.found = 0
+        self.last_ip = "-"
+        self.last_pw_idx = 0
+        self.last_pw = "-"
+        self.lock = threading.Lock()
+        self.active = sys.stdout.isatty()
+
+    def _render_nolock(self):
+        if not self.active:
+            return
+        pw = self.last_pw
+        if len(pw) > 32:
+            pw = pw[:29] + "..."
+        line = (
+            "{b}passwords[{pi}/{pt}]{e} "
+            "{b}ips[{ii}/{it}]{e} | "
+            "{cy}{ip}{e} → {y}{pw}{e} | "
+            "{g}matched {f}{e}"
+        ).format(
+            b=C.BOLD, e=C.END, cy=C.CY, y=C.Y, g=C.G,
+            pi=self.last_pw_idx, pt=self.total_pw,
+            ii=self.ips_done, it=self.total_ips,
+            ip=self.last_ip, pw=pw, f=self.found,
+        )
+        sys.stdout.write("\r\033[K" + line)
+        sys.stdout.flush()
+
+    def trying(self, ip, pw_idx, pw):
+        with self.lock:
+            self.last_ip = ip
+            self.last_pw_idx = pw_idx
+            self.last_pw = pw
+            self._render_nolock()
+
+    def host_done(self, found=False):
+        with self.lock:
+            self.ips_done += 1
+            if found:
+                self.found += 1
+            self._render_nolock()
+
+    def emit(self, msg):
+        """Print a permanent line above the live status line."""
+        with self.lock:
+            if self.active:
+                sys.stdout.write("\r\033[K")
+            print(msg, flush=True)
+            self._render_nolock()
+
+    def finish(self):
+        with self.lock:
+            if self.active:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
 
 
 def banner():
@@ -210,26 +280,30 @@ def try_password(host, port, username, password):
     return _try_password_paramiko(host, port, username, password)
 
 
-def scan_host(host, port, username, passwords):
+def scan_host(host, port, username, passwords, progress):
     """Try each password against one host; stop at the first that works."""
     unreachable_streak = 0
-    for pw in passwords:
+    for idx, pw in enumerate(passwords, 1):
+        progress.trying(host, idx, pw)
         result = try_password(host, port, username, pw)
         if result is True:
-            log("{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
+            progress.emit("{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
                 C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, pw, C.END))
+            progress.host_done(found=True)
             return {"host": host, "status": "found", "password": pw}
         if isinstance(result, str) and result.startswith("ERR:"):
             unreachable_streak += 1
             # If the very first attempts can't even connect, the host is down.
             if unreachable_streak > RETRY_UNREACHABLE and unreachable_streak >= 2:
-                log("{}[x] UNREACH{} {}{:<16}{}  ({})".format(
+                progress.emit("{}[x] UNREACH{} {}{:<16}{}  ({})".format(
                     C.R, C.END, C.DIM, host, C.END, result[4:]))
+                progress.host_done()
                 return {"host": host, "status": "unreachable", "error": result[4:]}
         else:
             unreachable_streak = 0
-    log("{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
+    progress.emit("{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
         C.Y, C.END, C.DIM, host, C.END))
+    progress.host_done()
     return {"host": host, "status": "notfound"}
 
 
@@ -260,6 +334,7 @@ def main():
         sys.exit(1)
 
     total = len(ips) * len(passwords)
+    workers = max(1, min(MAX_WORKERS, len(ips)))
     log("")
     log("{}Summary{}".format(C.BOLD, C.END))
     log("  Port       : {}".format(port))
@@ -267,7 +342,8 @@ def main():
     log("  Servers    : {}".format(len(ips)))
     log("  Passwords  : {}".format(len(passwords)))
     log("  Max checks : {} (stops at first match per server)".format(total))
-    log("  Parallel   : {} servers at once".format(MAX_WORKERS))
+    log("  Parallel   : {} servers at once".format(workers))
+    log("  Timeout    : {}s per attempt".format(CONNECT_TIMEOUT))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
     log("")
 
@@ -282,9 +358,10 @@ def main():
 
     started = datetime.now()
     results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    progress = Progress(len(ips), len(passwords))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(scan_host, host, port, username, passwords): host
+            pool.submit(scan_host, host, port, username, passwords, progress): host
             for host in ips
         }
         for fut in as_completed(futures):
@@ -292,9 +369,10 @@ def main():
                 results.append(fut.result())
             except Exception as e:  # noqa
                 host = futures[fut]
-                log(C.R + "[!] Error scanning {}: {}".format(host, e) + C.END)
+                progress.emit(C.R + "[!] Error scanning {}: {}".format(host, e) + C.END)
                 results.append({"host": host, "status": "error", "error": str(e)})
 
+    progress.finish()
     elapsed = (datetime.now() - started).total_seconds()
 
     # Keep the report in the same order as the input IP file

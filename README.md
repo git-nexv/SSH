@@ -96,11 +96,27 @@ nexv-ssh --help        # show all commands
 
 ## Notes & tuning
 
-You can tweak behavior at the top of `nexv_ssh.py`:
+A live status line shows progress while scanning:
 
-- `CONNECT_TIMEOUT` / `AUTH_TIMEOUT` — connection and auth timeouts (seconds)
-- `MAX_WORKERS` — how many servers to scan in parallel
-- Set `NO_COLOR=1` to disable colored output.
+```
+passwords[11/50] ips[10/100] | 85.214.203.149 → Summer2023 | matched 3
+```
+
+Speed/behavior can be tuned with environment variables:
+
+- `NEXV_WORKERS` — how many servers to scan in parallel (default `100`; actual
+  is capped to the number of servers, so all of them run at once).
+- `NEXV_TIMEOUT` — per-attempt connect/auth timeout in seconds (default `6`).
+- `NO_COLOR=1` — disable colored output.
+
+Example (fast, short timeout):
+
+```bash
+NEXV_WORKERS=100 NEXV_TIMEOUT=5 nexv-ssh
+```
+
+> Passwords are tried **one at a time per server** (not in parallel on the same
+> server) on purpose, to avoid triggering account lockouts or IP bans.
 
 ## Requirements
 
