@@ -11,12 +11,18 @@ systems you do not own or have written permission to access.
 
 import os
 import sys
+import json
+import time
 import shutil
 import socket
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+# Where scan progress is saved so an interrupted run can be resumed with
+# `nexv-ssh continue`.
+STATE_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "state.json")
 
 # ---- connection engines ----------------------------------------------------
 # Preferred: the system OpenSSH client + sshpass. It is far more compatible
@@ -147,6 +153,68 @@ class Progress:
             if self.active:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
+
+
+class State:
+    """Persists scan progress to disk so `nexv-ssh continue` can resume.
+
+    Per-IP record is one of:
+      {"status": "found", "password": "..."}
+      {"status": "notfound"}
+      {"status": "unreachable", "error": "..."}
+      {"status": "inprogress", "idx": <0-based password index being tried>}
+    """
+
+    def __init__(self, path=STATE_PATH):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = {"version": 1, "config": {}, "ips": {}}
+        self._last_save = 0.0
+
+    def init_fresh(self, config):
+        with self.lock:
+            self.data = {"version": 1, "config": config, "ips": {}}
+            self._save_nolock(force=True)
+
+    def load(self):
+        with open(self.path, "r", encoding="utf-8") as fh:
+            self.data = json.load(fh)
+        return self.data
+
+    def exists(self):
+        return os.path.isfile(self.path)
+
+    def config(self):
+        return self.data.get("config", {})
+
+    def get(self, ip):
+        return self.data.get("ips", {}).get(ip)
+
+    def set_inprogress(self, ip, idx):
+        with self.lock:
+            self.data["ips"][ip] = {"status": "inprogress", "idx": idx}
+            self._save_nolock()
+
+    def set_done(self, ip, status, **extra):
+        with self.lock:
+            rec = {"status": status}
+            rec.update(extra)
+            self.data["ips"][ip] = rec
+            self._save_nolock(force=True)
+
+    def _save_nolock(self, force=False):
+        now = time.time()
+        if not force and (now - self._last_save) < 1.0:
+            return
+        self._last_save = now
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh)
+            os.replace(tmp, self.path)
+        except Exception:
+            pass
 
 
 def banner():
@@ -295,22 +363,31 @@ def try_password(host, port, username, password):
     return _try_password_paramiko(host, port, username, password)
 
 
-def scan_host(host, port, username, passwords, progress):
-    """Try each password against one host; stop at the first that works."""
+def scan_host(host, port, username, passwords, progress, state, start_idx=0):
+    """Try each password against one host; stop at the first that works.
+
+    start_idx lets a resumed run continue from the password it was on.
+    """
     # Fast pre-check: if the port isn't even open, don't waste any attempts.
     if not host_is_open(host, port, PROBE_TIMEOUT):
         progress.emit("{}[x] UNREACH{} {}{:<16}{}  (port closed / no response)".format(
             C.R, C.END, C.DIM, host, C.END))
+        state.set_done(host, "unreachable", error="port closed/timeout")
         progress.host_done()
         return {"host": host, "status": "unreachable", "error": "port closed/timeout"}
 
     unreachable_streak = 0
-    for idx, pw in enumerate(passwords, 1):
-        progress.trying(host, idx, pw)
+    if start_idx < 0:
+        start_idx = 0
+    for idx in range(start_idx, len(passwords)):
+        pw = passwords[idx]
+        progress.trying(host, idx + 1, pw)
+        state.set_inprogress(host, idx)
         result = try_password(host, port, username, pw)
         if result is True:
             progress.emit("{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
                 C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, pw, C.END))
+            state.set_done(host, "found", password=pw)
             progress.host_done(found=True)
             return {"host": host, "status": "found", "password": pw}
         if isinstance(result, str) and result.startswith("ERR:"):
@@ -319,72 +396,86 @@ def scan_host(host, port, username, passwords, progress):
             if unreachable_streak > RETRY_UNREACHABLE and unreachable_streak >= 2:
                 progress.emit("{}[x] UNREACH{} {}{:<16}{}  ({})".format(
                     C.R, C.END, C.DIM, host, C.END, result[4:]))
+                state.set_done(host, "unreachable", error=result[4:])
                 progress.host_done()
                 return {"host": host, "status": "unreachable", "error": result[4:]}
         else:
             unreachable_streak = 0
     progress.emit("{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
         C.Y, C.END, C.DIM, host, C.END))
+    state.set_done(host, "notfound")
     progress.host_done()
     return {"host": host, "status": "notfound"}
 
 
-def main():
-    banner()
+def _rec_to_result(host, rec):
+    """Convert a saved state record back into a result dict for the report."""
+    status = rec.get("status")
+    if status == "found":
+        return {"host": host, "status": "found", "password": rec.get("password", "")}
+    if status == "unreachable":
+        return {"host": host, "status": "unreachable", "error": rec.get("error", "unknown")}
+    return {"host": host, "status": "notfound"}
 
-    port_raw = ask("SSH port to test", "22")
-    try:
-        port = int(port_raw)
-        if not (1 <= port <= 65535):
-            raise ValueError
-    except ValueError:
-        log(C.R + "[!] Invalid port: {}".format(port_raw) + C.END)
-        sys.exit(1)
 
-    username = ask("SSH username", "root")
-    ip_file = ask("IP list file (one IP per line)", "ip.txt")
-    pw_file = ask("Password list file (one password per line)", "password.txt")
+def do_scan(port, username, ips, passwords, state, resume=False):
+    """Scan the pending hosts (optionally resuming), return all results."""
+    results = []
+    pending = []                 # list of (host, start_idx)
+    done_count = 0
+    found_count = 0
 
-    ips = load_lines(ip_file)
-    passwords = load_lines(pw_file)
-
-    if not ips:
-        log(C.R + "[!] No IPs found in {}".format(ip_file) + C.END)
-        sys.exit(1)
-    if not passwords:
-        log(C.R + "[!] No passwords found in {}".format(pw_file) + C.END)
-        sys.exit(1)
+    for host in ips:
+        rec = state.get(host) if resume else None
+        if rec and rec.get("status") in ("found", "notfound", "unreachable"):
+            results.append(_rec_to_result(host, rec))
+            done_count += 1
+            if rec["status"] == "found":
+                found_count += 1
+        else:
+            start_idx = 0
+            if rec and rec.get("status") == "inprogress":
+                start_idx = int(rec.get("idx", 0))
+            pending.append((host, start_idx))
 
     total = len(ips) * len(passwords)
-    workers = max(1, min(MAX_WORKERS, len(ips)))
+    workers = max(1, min(MAX_WORKERS, len(pending) or 1))
     log("")
     log("{}Summary{}".format(C.BOLD, C.END))
     log("  Port       : {}".format(port))
     log("  Username   : {}".format(username))
     log("  Servers    : {}".format(len(ips)))
     log("  Passwords  : {}".format(len(passwords)))
+    if resume:
+        log("  {}Resuming{}   : {} already done, {} left to scan".format(
+            C.G, C.END, done_count, len(pending)))
     log("  Max checks : {} (stops at first match per server)".format(total))
     log("  Parallel   : {} servers at once".format(workers))
     log("  Timeout    : {}s per attempt  (TCP probe {}s)".format(CONNECT_TIMEOUT, PROBE_TIMEOUT))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
     log("")
 
+    if not pending:
+        log(C.G + "Everything is already done — nothing left to scan." + C.END)
+        return results, 0.0
+
     confirm = ask("Start scanning? (y/n)", "y").lower()
     if confirm not in ("y", "yes"):
-        log(C.Y + "Cancelled." + C.END)
+        log(C.Y + "Cancelled. Progress is saved; run 'nexv-ssh continue' to resume." + C.END)
         sys.exit(0)
 
     log("")
-    log(C.DIM + "Scanning... (this can take a while)" + C.END)
+    log(C.DIM + "Scanning... (progress is saved; you can resume with 'nexv-ssh continue')" + C.END)
     log("")
 
     started = datetime.now()
-    results = []
     progress = Progress(len(ips), len(passwords))
+    progress.ips_done = done_count
+    progress.found = found_count
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(scan_host, host, port, username, passwords, progress): host
-            for host in ips
+            pool.submit(scan_host, host, port, username, passwords, progress, state, sidx): host
+            for host, sidx in pending
         }
         for fut in as_completed(futures):
             try:
@@ -396,7 +487,10 @@ def main():
 
     progress.finish()
     elapsed = (datetime.now() - started).total_seconds()
+    return results, elapsed
 
+
+def report(port, username, ips, results, elapsed):
     # Keep the report in the same order as the input IP file
     order = {ip: i for i, ip in enumerate(ips)}
     results.sort(key=lambda r: order.get(r["host"], 1e9))
@@ -438,10 +532,11 @@ def main():
         elapsed, len(found), len(notfound), len(unreachable)) + C.END)
 
     # ------------------------- save results ------------------------------
-    out_path = "nexv_results_{}.txt".format(started.strftime("%Y%m%d_%H%M%S"))
+    now = datetime.now()
+    out_path = "nexv_results_{}.txt".format(now.strftime("%Y%m%d_%H%M%S"))
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write("nexv-ssh results  -  {}\n".format(started.isoformat()))
+            fh.write("nexv-ssh results  -  {}\n".format(now.isoformat()))
             fh.write("port={}  username={}\n\n".format(port, username))
             fh.write("# MATCHED (ip | port | password)\n")
             for r in found:
@@ -455,6 +550,94 @@ def main():
         log(C.DIM + "Saved: {}".format(os.path.abspath(out_path)) + C.END)
     except Exception as e:  # noqa
         log(C.R + "[!] Could not save results file: {}".format(e) + C.END)
+
+
+def ask_port(default="22"):
+    port_raw = ask("SSH port to test", default)
+    try:
+        port = int(port_raw)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except ValueError:
+        log(C.R + "[!] Invalid port: {}".format(port_raw) + C.END)
+        sys.exit(1)
+    return port
+
+
+def run_fresh():
+    """Start a brand-new scan (asks for everything), saving progress as it goes."""
+    port = ask_port()
+    username = ask("SSH username", "root")
+    ip_file = ask("IP list file (one IP per line)", "ip.txt")
+    pw_file = ask("Password list file (one password per line)", "password.txt")
+
+    ips = load_lines(ip_file)
+    passwords = load_lines(pw_file)
+    if not ips:
+        log(C.R + "[!] No IPs found in {}".format(ip_file) + C.END)
+        sys.exit(1)
+    if not passwords:
+        log(C.R + "[!] No passwords found in {}".format(pw_file) + C.END)
+        sys.exit(1)
+
+    state = State()
+    state.init_fresh({
+        "port": port,
+        "username": username,
+        "ip_file": os.path.abspath(ip_file),
+        "pw_file": os.path.abspath(pw_file),
+    })
+
+    results, elapsed = do_scan(port, username, ips, passwords, state, resume=False)
+    report(port, username, ips, results, elapsed)
+
+
+def run_resume():
+    """Resume an interrupted scan from the saved progress file."""
+    state = State()
+    if not state.exists():
+        log(C.Y + "[!] No saved progress found." + C.END)
+        log("    Start a new scan first with:  " + C.BOLD + "nexv-ssh" + C.END)
+        sys.exit(1)
+    try:
+        state.load()
+    except Exception as e:  # noqa
+        log(C.R + "[!] Could not read saved progress: {}".format(e) + C.END)
+        sys.exit(1)
+
+    cfg = state.config()
+    port = cfg.get("port", 22)
+    username = cfg.get("username", "root")
+    ip_file = cfg.get("ip_file", "ip.txt")
+    pw_file = cfg.get("pw_file", "password.txt")
+
+    log(C.DIM + "Resuming previous scan:" + C.END)
+    log("  IP file       : {}".format(ip_file))
+    log("  Password file : {}".format(pw_file))
+
+    for label, path in (("IP", ip_file), ("Password", pw_file)):
+        if not os.path.isfile(path):
+            log(C.R + "[!] {} file no longer exists: {}".format(label, path) + C.END)
+            log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv-ssh" + C.END)
+            sys.exit(1)
+
+    ips = load_lines(ip_file)
+    passwords = load_lines(pw_file)
+    if not ips or not passwords:
+        log(C.R + "[!] IP or password file is now empty." + C.END)
+        sys.exit(1)
+
+    results, elapsed = do_scan(port, username, ips, passwords, state, resume=True)
+    report(port, username, ips, results, elapsed)
+
+
+def main():
+    banner()
+    arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+    if arg in ("continue", "--continue", "-c", "resume", "--resume"):
+        run_resume()
+    else:
+        run_fresh()
 
 
 if __name__ == "__main__":

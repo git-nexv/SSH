@@ -78,6 +78,20 @@ This installs Python + paramiko and registers the command `nexv-ssh`.
 
 ---
 
+## Resume an interrupted scan
+
+Progress is saved continuously while scanning (to `~/.nexv-ssh/state.json`).
+If your SSH session drops, the server reboots, or you close the terminal in the
+middle of a scan, just reopen the terminal and run:
+
+```bash
+nexv-ssh continue
+```
+
+It picks up where it left off — servers that were already finished are skipped,
+and the server that was in progress resumes from the exact password it was on,
+so you never have to start over.
+
 ## Update & Uninstall
 
 ```bash
