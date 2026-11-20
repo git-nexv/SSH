@@ -11,24 +11,35 @@ systems you do not own or have written permission to access.
 
 import os
 import sys
+import shutil
 import socket
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-try:
-    import paramiko
-except ImportError:
-    sys.stderr.write(
-        "\n[!] paramiko is not installed.\n"
-        "    Install it with:  pip3 install paramiko\n"
-        "    (or just re-run the nexv-ssh installer)\n\n"
-    )
-    sys.exit(1)
+# ---- connection engines ----------------------------------------------------
+# Preferred: the system OpenSSH client + sshpass. It is far more compatible
+# with real-world servers (old or hardened crypto) than paramiko.
+# Fallback: paramiko (pure-python), used only if ssh/sshpass are missing.
+SSH_BIN = shutil.which("ssh")
+SSHPASS_BIN = shutil.which("sshpass")
+USE_SSHPASS = bool(SSH_BIN and SSHPASS_BIN)
 
-# Silence paramiko's noisy transport logging
-import logging
-logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+paramiko = None
+if not USE_SSHPASS:
+    try:
+        import paramiko  # noqa
+        import logging
+        logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+    except ImportError:
+        sys.stderr.write(
+            "\n[!] Neither 'sshpass' nor 'paramiko' is available.\n"
+            "    Re-run the nexv-ssh installer, or install one of:\n"
+            "      - sshpass + openssh-client   (recommended)\n"
+            "      - pip3 install paramiko\n\n"
+        )
+        sys.exit(1)
 
 # ----------------------------- colors --------------------------------------
 class C:
@@ -110,12 +121,56 @@ def load_lines(path):
     return out
 
 
-def try_password(host, port, username, password):
-    """Return True if this password authenticates, False if rejected.
+def _try_password_sshpass(host, port, username, password):
+    """Authenticate using the OpenSSH client driven by sshpass."""
+    cmd = [
+        SSHPASS_BIN, "-p", password,
+        SSH_BIN,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "GlobalKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout={}".format(CONNECT_TIMEOUT),
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "PreferredAuthentications=password,keyboard-interactive",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "LogLevel=ERROR",
+        "-p", str(port),
+        "{}@{}".format(username, host),
+        "exit",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=CONNECT_TIMEOUT + AUTH_TIMEOUT + 5,
+        )
+    except subprocess.TimeoutExpired:
+        return "ERR:timeout"
+    except Exception as e:  # noqa
+        return "ERR:" + type(e).__name__
 
-    Returns a string error marker if the host could not be reached at all,
-    so the caller can distinguish 'wrong password' from 'host down'.
-    """
+    if proc.returncode == 0:
+        return True
+
+    err = (proc.stderr or b"").decode("utf-8", "replace").lower()
+    if "permission denied" in err or "authentication failed" in err:
+        return False
+    if proc.returncode == 5:            # sshpass: incorrect password
+        return False
+    if "connection refused" in err:
+        return "ERR:refused"
+    if "timed out" in err or "timeout" in err:
+        return "ERR:timeout"
+    if "no route to host" in err:
+        return "ERR:no-route"
+    if "could not resolve" in err or "name or service not known" in err:
+        return "ERR:dns"
+    last = err.strip().splitlines()[-1][:40] if err.strip() else "rc{}".format(proc.returncode)
+    return "ERR:" + last
+
+
+def _try_password_paramiko(host, port, username, password):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -142,6 +197,17 @@ def try_password(host, port, username, password):
             client.close()
         except Exception:
             pass
+
+
+def try_password(host, port, username, password):
+    """Return True if this password authenticates, False if rejected.
+
+    Returns a string marker starting with 'ERR:' if the host could not be
+    reached at all, so the caller can tell 'wrong password' from 'host down'.
+    """
+    if USE_SSHPASS:
+        return _try_password_sshpass(host, port, username, password)
+    return _try_password_paramiko(host, port, username, password)
 
 
 def scan_host(host, port, username, passwords):
@@ -202,6 +268,7 @@ def main():
     log("  Passwords  : {}".format(len(passwords)))
     log("  Max checks : {} (stops at first match per server)".format(total))
     log("  Parallel   : {} servers at once".format(MAX_WORKERS))
+    log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
     log("")
 
     confirm = ask("Start scanning? (y/n)", "y").lower()

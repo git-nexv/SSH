@@ -34,19 +34,19 @@ say "Installing nexv-ssh ..."
 install_deps() {
     if command -v apt-get >/dev/null 2>&1; then
         $SUDO apt-get update -y
-        $SUDO apt-get install -y python3 python3-pip python3-venv git
+        $SUDO apt-get install -y python3 python3-pip python3-venv git sshpass openssh-client
     elif command -v dnf >/dev/null 2>&1; then
-        $SUDO dnf install -y python3 python3-pip git
+        $SUDO dnf install -y python3 python3-pip git sshpass openssh-clients
     elif command -v yum >/dev/null 2>&1; then
-        $SUDO yum install -y python3 python3-pip git
+        $SUDO yum install -y python3 python3-pip git sshpass openssh-clients
     elif command -v pacman >/dev/null 2>&1; then
-        $SUDO pacman -Sy --noconfirm python python-pip git
+        $SUDO pacman -Sy --noconfirm python python-pip git sshpass openssh
     elif command -v apk >/dev/null 2>&1; then
-        $SUDO apk add --no-cache python3 py3-pip git
+        $SUDO apk add --no-cache python3 py3-pip git sshpass openssh-client
     elif command -v zypper >/dev/null 2>&1; then
-        $SUDO zypper install -y python3 python3-pip git
+        $SUDO zypper install -y python3 python3-pip git sshpass openssh
     else
-        warn "Unknown package manager. Make sure python3, pip and git are installed."
+        warn "Unknown package manager. Make sure python3, pip, git and sshpass are installed."
     fi
 }
 install_deps
@@ -79,11 +79,17 @@ if python3 -m venv "$VENV_DIR" 2>/dev/null; then
 fi
 
 if [ -z "$PYBIN" ]; then
-    warn "venv install failed, trying a direct pip install ..."
+    warn "venv install failed; trying a direct pip install (paramiko fallback) ..."
     python3 -m pip install --user paramiko --break-system-packages 2>/dev/null \
-        || python3 -m pip install --user paramiko \
-        || die "Could not install paramiko. Install it manually: pip3 install paramiko"
+        || python3 -m pip install --user paramiko 2>/dev/null \
+        || warn "paramiko not installed; will rely on sshpass + openssh (recommended anyway)."
     PYBIN="python3"
+fi
+
+# sshpass is the primary engine; make sure it is present.
+if ! command -v sshpass >/dev/null 2>&1; then
+    warn "sshpass not found. The tool works best with it; the installer tried to"
+    warn "install it above. If missing, install manually (e.g. apt install sshpass)."
 fi
 
 # ---- create the launcher command ------------------------------------------
