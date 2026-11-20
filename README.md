@@ -110,11 +110,14 @@ nexv-ssh --help        # show all commands
 
 ## Notes & tuning
 
-A live status line shows progress while scanning:
+A live status line shows elapsed time and progress while scanning:
 
 ```
-passwords[11/50] ips[10/100] | 85.214.203.149 → Summer2023 | matched 3
+[01:23] passwords[11/50] ips[10/100] | 85.214.203.149 → Summer2023 | matched 3
 ```
+
+The `[MM:SS]` timer updates every second so you can see exactly how long the
+scan is taking; the total time is also printed at the end.
 
 **Speed:** before trying any password, each server gets a fast TCP port probe.
 Dead or filtered servers are skipped instantly instead of waiting out a timeout

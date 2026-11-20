@@ -105,6 +105,32 @@ class Progress:
         self.last_pw = "-"
         self.lock = threading.Lock()
         self.active = sys.stdout.isatty()
+        self.start_time = None
+        self._ticker = None
+        self._stop = False
+
+    def start_timer(self):
+        """Begin the elapsed clock and a background thread that refreshes the
+        timer every second even while no attempt has finished."""
+        self.start_time = time.time()
+        if self.active:
+            self._stop = False
+            self._ticker = threading.Thread(target=self._tick, daemon=True)
+            self._ticker.start()
+
+    def _tick(self):
+        while not self._stop:
+            time.sleep(1.0)
+            with self.lock:
+                if self._stop:
+                    break
+                self._render_nolock()
+
+    def _elapsed_str(self):
+        if not self.start_time:
+            return "00:00"
+        s = int(time.time() - self.start_time)
+        return "{:02d}:{:02d}".format(s // 60, s % 60)
 
     def _render_nolock(self):
         if not self.active:
@@ -113,12 +139,14 @@ class Progress:
         if len(pw) > 32:
             pw = pw[:29] + "..."
         line = (
+            "{d}[{t}]{e} "
             "{b}passwords[{pi}/{pt}]{e} "
             "{b}ips[{ii}/{it}]{e} | "
             "{cy}{ip}{e} → {y}{pw}{e} | "
             "{g}matched {f}{e}"
         ).format(
-            b=C.BOLD, e=C.END, cy=C.CY, y=C.Y, g=C.G,
+            d=C.DIM, t=self._elapsed_str(), b=C.BOLD, e=C.END,
+            cy=C.CY, y=C.Y, g=C.G,
             pi=self.last_pw_idx, pt=self.total_pw,
             ii=self.ips_done, it=self.total_ips,
             ip=self.last_ip, pw=pw, f=self.found,
@@ -150,6 +178,7 @@ class Progress:
 
     def finish(self):
         with self.lock:
+            self._stop = True
             if self.active:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
@@ -472,6 +501,7 @@ def do_scan(port, username, ips, passwords, state, resume=False):
     progress = Progress(len(ips), len(passwords))
     progress.ips_done = done_count
     progress.found = found_count
+    progress.start_timer()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(scan_host, host, port, username, passwords, progress, state, sidx): host
