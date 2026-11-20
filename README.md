@@ -29,12 +29,14 @@ This installs the engine and registers the command `nexv`.
 
 1. In the folder where you want to work, create two files:
 
-   **`ip.txt`** — one server IP (or hostname) per line:
+   **`ip.txt`** — one server IP (or hostname) per line. Optionally add a port
+   as `IP:PORT` to override the default port for that one server:
    ```
    192.168.1.10
-   203.0.113.5
-   server1.example.com
+   203.0.113.5:2222
+   server1.example.com:22
    ```
+   Lines without a port use the port you pick when the scan starts.
 
    **`password.txt`** — one candidate password per line:
    ```
