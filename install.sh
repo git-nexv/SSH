@@ -96,7 +96,49 @@ fi
 LAUNCHER="$INSTALL_DIR/launcher.sh"
 cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
-exec "$PYBIN" "$INSTALL_DIR/nexv_ssh.py" "\$@"
+# nexv-ssh launcher (auto-generated)
+NEXV_DIR="$INSTALL_DIR"
+PYBIN="$PYBIN"
+INSTALL_URL="https://raw.githubusercontent.com/git-nexv/SSH/main/install.sh"
+CMD_NAME="$CMD_NAME"
+EOF
+cat >> "$LAUNCHER" <<'EOF'
+
+_sudo=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then _sudo="sudo"; fi
+
+case "${1:-}" in
+    --update|-u|update)
+        echo "[*] Updating nexv-ssh ..."
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$INSTALL_URL" | bash
+        else
+            wget -qO- "$INSTALL_URL" | bash
+        fi
+        exit $?
+        ;;
+    --uninstall|--remove|uninstall|remove)
+        echo "[*] Uninstalling nexv-ssh ..."
+        $_sudo rm -f /usr/local/bin/"$CMD_NAME" 2>/dev/null || rm -f /usr/local/bin/"$CMD_NAME" 2>/dev/null
+        rm -f "$HOME/.local/bin/$CMD_NAME" 2>/dev/null
+        rm -rf "$NEXV_DIR"
+        echo "[*] Done. nexv-ssh has been removed."
+        exit 0
+        ;;
+    --help|-h|help)
+        echo "nexv-ssh - SSH credential finder"
+        echo ""
+        echo "Usage:"
+        echo "  nexv-ssh              Start scanning (asks: port, username, IP file, password file)"
+        echo "  nexv-ssh --update     Update to the latest version from GitHub"
+        echo "  nexv-ssh --uninstall  Remove nexv-ssh from this machine"
+        echo "  nexv-ssh --help       Show this help"
+        exit 0
+        ;;
+    *)
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" "$@"
+        ;;
+esac
 EOF
 chmod +x "$LAUNCHER"
 
@@ -118,4 +160,8 @@ say "${BOLD}Done!${END} Installed as: ${BOLD}${CMD_NAME}${END}  (${TARGET})"
 echo ""
 echo -e "Run it with:   ${BOLD}${CMD_NAME}${END}"
 echo "It will ask for: SSH port, username, IP file, password file."
+echo ""
+echo "Other commands:"
+echo -e "  ${BOLD}${CMD_NAME} --update${END}     update to the latest version"
+echo -e "  ${BOLD}${CMD_NAME} --uninstall${END}  remove nexv-ssh"
 echo ""

@@ -78,6 +78,14 @@ This installs Python + paramiko and registers the command `nexv-ssh`.
 
 ---
 
+## Update & Uninstall
+
+```bash
+nexv-ssh --update      # pull the latest version from GitHub
+nexv-ssh --uninstall   # remove nexv-ssh from this machine
+nexv-ssh --help        # show all commands
+```
+
 ## How it works
 
 - For each server it tries the passwords one by one and **stops at the first
