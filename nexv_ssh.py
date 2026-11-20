@@ -71,11 +71,20 @@ if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
 #   NEXV_TIMEOUT  - per-attempt connect/auth timeout, seconds (default 4)
 #   NEXV_PROBE    - fast TCP port-probe timeout, seconds   (default min(timeout,2))
 #   NEXV_WORKERS  - max servers scanned in parallel        (default 100)
+#   NEXV_RETRIES  - retries on a transient error (reset/timeout) (default 3)
+#   NEXV_DELAY    - seconds to wait between attempts on one host (default 0)
 CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "4"))
 AUTH_TIMEOUT = CONNECT_TIMEOUT
 PROBE_TIMEOUT = float(os.environ.get("NEXV_PROBE", str(min(CONNECT_TIMEOUT, 2))))
 MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "100"))
-RETRY_UNREACHABLE = 1      # retry count when the host times out / resets
+RETRIES = int(os.environ.get("NEXV_RETRIES", "3"))
+INTER_DELAY = float(os.environ.get("NEXV_DELAY", "0"))
+RETRY_UNREACHABLE = 1      # consecutive hard failures before marking a host down
+
+# Error markers treated as transient (server is up but throttling us): retried
+# with backoff instead of giving up. 'reset' covers kex_exchange_identification
+# / connection reset by peer, the classic signature of SSH rate-limiting.
+TRANSIENT_ERRORS = ("reset", "timeout")
 
 _print_lock = threading.Lock()
 
@@ -389,11 +398,16 @@ def _try_password_sshpass(host, port, username, password):
         return False
     if proc.returncode == 5:            # sshpass: incorrect password
         return False
+    # Server is up but reset us mid-handshake -> rate-limiting / MaxStartups /
+    # fail2ban. Transient: worth retrying with backoff.
+    if ("kex_exchange_identification" in err or "reset by peer" in err
+            or "connection reset" in err):
+        return "ERR:reset"
     if "connection refused" in err:
         return "ERR:refused"
     if "timed out" in err or "timeout" in err:
         return "ERR:timeout"
-    if "no route to host" in err:
+    if "no route to host" in err or "network is unreachable" in err:
         return "ERR:no-route"
     if "could not resolve" in err or "name or service not known" in err:
         return "ERR:dns"
@@ -430,15 +444,31 @@ def _try_password_paramiko(host, port, username, password):
             pass
 
 
+def _try_once(host, port, username, password):
+    if USE_SSHPASS:
+        return _try_password_sshpass(host, port, username, password)
+    return _try_password_paramiko(host, port, username, password)
+
+
 def try_password(host, port, username, password):
     """Return True if this password authenticates, False if rejected.
 
     Returns a string marker starting with 'ERR:' if the host could not be
-    reached at all, so the caller can tell 'wrong password' from 'host down'.
+    reached. Transient errors (connection reset / timeout, i.e. the server is up
+    but rate-limiting us) are retried with increasing backoff before giving up.
     """
-    if USE_SSHPASS:
-        return _try_password_sshpass(host, port, username, password)
-    return _try_password_paramiko(host, port, username, password)
+    attempt = 0
+    while True:
+        result = _try_once(host, port, username, password)
+        if result is True or result is False:
+            return result
+        kind = result[4:] if isinstance(result, str) else ""
+        transient = any(k in kind for k in TRANSIENT_ERRORS)
+        if transient and attempt < RETRIES:
+            attempt += 1
+            time.sleep(min(3.0, 0.6 * attempt))   # backoff: 0.6s, 1.2s, 1.8s ...
+            continue
+        return result
 
 
 def scan_host(host, port, username, passwords, progress, state, start_idx=0):
@@ -470,12 +500,16 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
             unreachable_streak += 1
             # If the very first attempts can't even connect, the host is down.
             if unreachable_streak > RETRY_UNREACHABLE and unreachable_streak >= 2:
-                state.set_done(host, "unreachable", error=result[4:])
+                err = result[4:]
+                note = "rate-limited? lower parallelism" if err == "reset" else err
+                state.set_done(host, "unreachable", error=note)
                 progress.host_done(host, "{}[x] UNREACH{} {}{:<16}{}  ({})".format(
-                    C.R, C.END, C.DIM, host, C.END, result[4:]))
-                return {"host": host, "status": "unreachable", "error": result[4:]}
+                    C.R, C.END, C.DIM, host, C.END, note))
+                return {"host": host, "status": "unreachable", "error": note}
         else:
             unreachable_streak = 0
+        if INTER_DELAY > 0:
+            time.sleep(INTER_DELAY)
     state.set_done(host, "notfound")
     progress.host_done(host, "{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
         C.Y, C.END, C.DIM, host, C.END))
@@ -527,6 +561,8 @@ def do_scan(port, username, ips, passwords, state, resume=False, workers=None):
     log("  Max checks : {} (stops at first match per server)".format(total))
     log("  Parallel   : {} servers at once".format(workers))
     log("  Timeout    : {}s per attempt  (TCP probe {}s)".format(CONNECT_TIMEOUT, PROBE_TIMEOUT))
+    log("  Retries    : {} on reset/timeout{}".format(
+        RETRIES, "  ·  delay {}s".format(INTER_DELAY) if INTER_DELAY > 0 else ""))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
     log("")
 

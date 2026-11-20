@@ -138,6 +138,10 @@ you run `nexv start` (higher = faster; as each server finishes, the next starts)
 
 Other settings via environment variables:
 
+- `NEXV_RETRIES` — retries on a transient error (connection reset / timeout)
+  with backoff, before marking a server unreachable (default `3`).
+- `NEXV_DELAY` — seconds to wait between attempts on one server (default `0`).
+  Raise it (e.g. `1`) if servers rate-limit or ban you.
 - `NEXV_TIMEOUT` — per-attempt connect/auth timeout in seconds (default `4`).
 - `NEXV_PROBE` — TCP port-probe timeout in seconds (default `min(timeout, 2)`).
 - `NO_COLOR=1` — disable colored output.
@@ -154,6 +158,23 @@ NEXV_TIMEOUT=3 NEXV_PROBE=1 nexv start
 
 > Passwords are tried **one at a time per server** (not in parallel on the same
 > server) on purpose, to avoid triggering account lockouts or IP bans.
+
+## Troubleshooting
+
+**Lots of `UNREACH ... (rate-limited? ...)` or `connection reset` errors.**
+This means the server *is* up, but it reset the connection during the SSH
+handshake — the classic sign of rate-limiting (`MaxStartups`, `fail2ban`, or a
+firewall) because too many connections came too fast. Fixes:
+
+- **Lower the parallel count** when it asks (try `5`–`10` instead of all at once).
+- **Add a delay** between attempts: `NEXV_DELAY=1 nexv start`.
+- The tool already retries these errors a few times with backoff (`NEXV_RETRIES`).
+
+Some VPS providers also throttle outbound SSH from *your* server when it opens
+many connections at once — lowering the parallel count helps there too.
+
+**`refused` / `port closed`** — nothing is listening on that port: the server is
+down, or its SSH port is not the one you entered.
 
 ## Requirements
 
