@@ -713,6 +713,13 @@ def run_fresh():
         "How many servers to check at the same time", default_workers,
         lo=1, hi=len(ips))
 
+    # How many times to retry a server that times out / won't connect before
+    # giving up on it.
+    global RETRIES
+    RETRIES = ask_int(
+        "How many retries when a server times out / won't connect", RETRIES,
+        lo=0, hi=20)
+
     state = State()
     state.init_fresh({
         "port": port,
@@ -720,6 +727,7 @@ def run_fresh():
         "ip_file": os.path.abspath(ip_file),
         "pw_file": os.path.abspath(pw_file),
         "workers": workers,
+        "retries": RETRIES,
     })
 
     results, elapsed = do_scan(port, username, ips, passwords, state,
@@ -746,6 +754,9 @@ def run_resume():
     ip_file = cfg.get("ip_file", "ip.txt")
     pw_file = cfg.get("pw_file", "password.txt")
     workers = cfg.get("workers")
+    global RETRIES
+    if cfg.get("retries") is not None:
+        RETRIES = int(cfg.get("retries"))
 
     log(C.DIM + "Resuming previous scan:" + C.END)
     log("  IP file       : {}".format(ip_file))
