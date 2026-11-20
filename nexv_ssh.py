@@ -487,24 +487,39 @@ def _try_once(host, port, username, password):
 
 
 def try_password(host, port, username, password):
-    """Return True if this password authenticates, False if rejected.
+    """Return (result, attempts).
 
-    Returns a string marker starting with 'ERR:' if the host could not be
-    reached. Transient errors (connection reset / timeout, i.e. the server is up
-    but rate-limiting us) are retried with increasing backoff before giving up.
+    result is True (auth ok), False (wrong password) or an 'ERR:...' marker.
+    attempts is how many connection attempts were made (1 + retries). Transient
+    errors (reset / timeout = server up but rate-limiting us) are retried with
+    increasing backoff before giving up.
     """
     attempt = 0
     while True:
+        attempt += 1
         result = _try_once(host, port, username, password)
         if result is True or result is False:
-            return result
+            return result, attempt
         kind = result[4:] if isinstance(result, str) else ""
         transient = any(k in kind for k in TRANSIENT_ERRORS)
-        if transient and attempt < RETRIES:
-            attempt += 1
+        if transient and attempt <= RETRIES:
             time.sleep(min(3.0, 0.6 * attempt))   # backoff: 0.6s, 1.2s, 1.8s ...
             continue
-        return result
+        return result, attempt
+
+
+def fmt_result_line(r):
+    """Build the permanent one-line result for a host (MATCH / NONE / UNREACH)."""
+    host = r["host"]
+    st = r["status"]
+    if st == "found":
+        return "{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
+            C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, r.get("password", ""), C.END)
+    if st in ("unreachable", "error"):
+        return "{}[x] UNREACH{} {}{:<16}{}  ({})".format(
+            C.R, C.END, C.DIM, host, C.END, r.get("error", "unknown"))
+    return "{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
+        C.Y, C.END, C.DIM, host, C.END)
 
 
 def scan_host(host, port, username, passwords, progress, state, start_idx=0):
@@ -514,42 +529,45 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
     """
     # Fast pre-check: if the port isn't even open, don't waste any attempts.
     if not host_is_open(host, port, PROBE_TIMEOUT):
-        state.set_done(host, "unreachable", error="port closed/timeout")
-        progress.host_done(host, "{}[x] UNREACH{} {}{:<16}{}  (port closed / no response)".format(
-            C.R, C.END, C.DIM, host, C.END))
-        return {"host": host, "status": "unreachable", "error": "port closed/timeout"}
+        r = {"host": host, "status": "unreachable", "error": "port closed / no response (1 try)"}
+        state.set_done(host, "unreachable", error=r["error"])
+        progress.host_done(host, fmt_result_line(r))
+        return r
 
     unreachable_streak = 0
+    tries = 0                     # total connection attempts made for this host
     if start_idx < 0:
         start_idx = 0
     for idx in range(start_idx, len(passwords)):
         pw = passwords[idx]
         progress.trying(host, idx + 1, pw)
         state.set_inprogress(host, idx)
-        result = try_password(host, port, username, pw)
+        result, attempts = try_password(host, port, username, pw)
+        tries += attempts
         if result is True:
+            r = {"host": host, "status": "found", "password": pw}
             state.set_done(host, "found", password=pw)
-            progress.host_done(host, "{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
-                C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, pw, C.END), found=True)
-            return {"host": host, "status": "found", "password": pw}
+            progress.host_done(host, fmt_result_line(r), found=True)
+            return r
         if isinstance(result, str) and result.startswith("ERR:"):
             unreachable_streak += 1
             # If the very first attempts can't even connect, the host is down.
             if unreachable_streak > RETRY_UNREACHABLE and unreachable_streak >= 2:
                 err = result[4:]
-                note = "rate-limited? lower parallelism" if err == "reset" else err
+                reason = "rate-limited? lower parallelism" if err == "reset" else err
+                note = "{}, {} tries".format(reason, tries)
+                r = {"host": host, "status": "unreachable", "error": note}
                 state.set_done(host, "unreachable", error=note)
-                progress.host_done(host, "{}[x] UNREACH{} {}{:<16}{}  ({})".format(
-                    C.R, C.END, C.DIM, host, C.END, note))
-                return {"host": host, "status": "unreachable", "error": note}
+                progress.host_done(host, fmt_result_line(r))
+                return r
         else:
             unreachable_streak = 0
         if INTER_DELAY > 0:
             time.sleep(INTER_DELAY)
+    r = {"host": host, "status": "notfound"}
     state.set_done(host, "notfound")
-    progress.host_done(host, "{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
-        C.Y, C.END, C.DIM, host, C.END))
-    return {"host": host, "status": "notfound"}
+    progress.host_done(host, fmt_result_line(r))
+    return r
 
 
 def _rec_to_result(host, rec):
@@ -608,6 +626,16 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
         RETRIES, "  ·  delay {}s".format(INTER_DELAY) if INTER_DELAY > 0 else ""))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
     log("")
+
+    # On resume, show everything already found/tested before so the picture is
+    # complete, not just the servers about to be scanned now.
+    if resume and results:
+        prev_order = {ip: i for i, ip in enumerate(ips)}
+        shown = sorted(results, key=lambda r: prev_order.get(r["host"], 1e9))
+        log(C.BOLD + "Results so far from the previous run ({}):".format(len(shown)) + C.END)
+        for r in shown:
+            log("  " + fmt_result_line(r))
+        log("")
 
     if not pending:
         log(C.G + "Everything is already done — nothing left to scan." + C.END)

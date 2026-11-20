@@ -100,9 +100,11 @@ middle of a scan, just reopen the terminal and run:
 nexv continue
 ```
 
-It picks up where it left off — servers that were already finished are skipped,
-and the server that was in progress resumes from the exact password it was on,
-so you never have to start over.
+It first reprints everything from the previous run (matches, no-matches and
+unreachable servers), then picks up where it left off — finished servers are
+skipped, and the server that was in progress resumes from the exact password it
+was on, so you never have to start over. Unreachable servers show how many
+connection attempts were made, e.g. `(rate-limited? ..., 6 tries)`.
 
 ## Commands
 
