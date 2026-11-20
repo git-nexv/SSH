@@ -574,7 +574,7 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
     found_count = 0
 
     for host in ips:
-        rec = state.get(host) if resume else None
+        rec = state.get(host)
         if rec and rec.get("status") in ("found", "notfound", "unreachable"):
             results.append(_rec_to_result(host, rec))
             done_count += 1
@@ -597,9 +597,10 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
     log("  Username   : {}".format(username))
     log("  Servers    : {}".format(len(ips)))
     log("  Passwords  : {}".format(len(passwords)))
-    if resume:
-        log("  {}Resuming{}   : {} already done, {} left to scan".format(
-            C.G, C.END, done_count, len(pending)))
+    if done_count:
+        label = "Resuming" if resume else "Skipping  "
+        log("  {}{}{} : {} already tested, {} left to scan".format(
+            C.G, label, C.END, done_count, len(pending)))
     log("  Max checks : {} (stops at first match per server)".format(total))
     log("  Parallel   : {} servers at once".format(workers))
     log("  Timeout    : {}s per attempt  (TCP probe {}s)".format(CONNECT_TIMEOUT, PROBE_TIMEOUT))
@@ -773,6 +774,26 @@ def run_fresh():
         "How many retries when a server times out / won't connect", RETRIES,
         lo=0, hi=20)
 
+    # If a previous scan tested some of these IPs (with passwords), offer to skip
+    # them. 'tested' means we reached a verdict (found / no match); servers that
+    # were only unreachable are NOT counted as tested and will be tried again.
+    history = {}
+    prev = State()
+    if prev.exists():
+        try:
+            prev.load()
+            history = prev.data.get("ips", {})
+        except Exception:  # noqa
+            history = {}
+    tested = [ip for ip in ips
+              if history.get(ip, {}).get("status") in ("found", "notfound")]
+    skip = set()
+    if tested:
+        ans = ask("Re-test the {} IP(s) already tested in a previous scan? (y/n)".format(
+            len(tested)), "n").lower()
+        if ans not in ("y", "yes"):
+            skip = set(tested)
+
     state = State()
     state.init_fresh({
         "port": port,
@@ -782,6 +803,14 @@ def run_fresh():
         "workers": workers,
         "retries": RETRIES,
     })
+    # Carry forward results for the IPs we're skipping, so they appear in the
+    # report and are not scanned again.
+    for ip in skip:
+        rec = history[ip]
+        if rec.get("status") == "found":
+            state.set_done(ip, "found", password=rec.get("password", ""))
+        else:
+            state.set_done(ip, "notfound")
 
     results, elapsed = do_scan(port, ports, username, ips, passwords, state,
                               resume=False, workers=workers)

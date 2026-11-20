@@ -61,6 +61,11 @@ This installs the engine and registers the command `nexv`.
    - **How many retries when a server times out / won't connect** (default `3`)
      — a server that resets or times out is retried this many times (with
      backoff) before being marked unreachable.
+   - **Re-test IPs already tested before?** (only asked if a previous scan
+     tested some of these IPs; default `n`). Answer `n` to skip servers that
+     already got a verdict (matched / no match) in an earlier scan — their old
+     result is carried into the new report. Servers that were only *unreachable*
+     before are **not** counted as tested and are tried again either way.
    - Then press `y` to start.
 
 4. When it finishes, you get a report like:
