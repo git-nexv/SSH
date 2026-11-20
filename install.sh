@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nexv-ssh installer
+# nexv installer
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/git-nexv/SSH/main/install.sh | bash
@@ -11,7 +11,7 @@ REPO_URL="https://github.com/git-nexv/SSH.git"
 RAW_PY="https://raw.githubusercontent.com/git-nexv/SSH/main/nexv_ssh.py"
 INSTALL_DIR="${HOME}/.nexv-ssh"
 BIN_DIR="/usr/local/bin"
-CMD_NAME="nexv-ssh"
+CMD_NAME="nexv"
 
 GREEN='\033[92m'; YELLOW='\033[93m'; RED='\033[91m'; BOLD='\033[1m'; END='\033[0m'
 say()  { echo -e "${GREEN}[*]${END} $*"; }
@@ -28,7 +28,7 @@ if [ "$(id -u)" -ne 0 ]; then
     fi
 fi
 
-say "Installing nexv-ssh ..."
+say "Installing nexv ..."
 
 # ---- install python3 + pip + git ------------------------------------------
 install_deps() {
@@ -96,7 +96,7 @@ fi
 LAUNCHER="$INSTALL_DIR/launcher.sh"
 cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
-# nexv-ssh launcher (auto-generated)
+# nexv launcher (auto-generated)
 NEXV_DIR="$INSTALL_DIR"
 PYBIN="$PYBIN"
 INSTALL_URL="https://raw.githubusercontent.com/git-nexv/SSH/main/install.sh"
@@ -107,9 +107,27 @@ cat >> "$LAUNCHER" <<'EOF'
 _sudo=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then _sudo="sudo"; fi
 
+show_help() {
+    echo "nexv - SSH credential finder"
+    echo ""
+    echo "Usage:"
+    echo "  nexv start      Start a new scan (asks: port, username, IP file,"
+    echo "                  password file, and how many servers to check at once)"
+    echo "  nexv continue   Resume an interrupted scan from where it stopped"
+    echo "  nexv update     Update to the latest version from GitHub"
+    echo "  nexv uninstall  Remove nexv from this machine"
+    echo "  nexv help       Show this help"
+}
+
 case "${1:-}" in
-    --update|-u|update)
-        echo "[*] Updating nexv-ssh ..."
+    start|run|scan)
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" start
+        ;;
+    continue|resume|-c|--continue)
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" continue
+        ;;
+    update|--update|-u)
+        echo "[*] Updating nexv ..."
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "$INSTALL_URL" | bash
         else
@@ -117,31 +135,32 @@ case "${1:-}" in
         fi
         exit $?
         ;;
-    --uninstall|--remove|uninstall|remove)
-        echo "[*] Uninstalling nexv-ssh ..."
-        $_sudo rm -f /usr/local/bin/"$CMD_NAME" 2>/dev/null || rm -f /usr/local/bin/"$CMD_NAME" 2>/dev/null
-        rm -f "$HOME/.local/bin/$CMD_NAME" 2>/dev/null
+    uninstall|remove|--uninstall|--remove)
+        echo "[*] Uninstalling nexv ..."
+        $_sudo rm -f /usr/local/bin/nexv /usr/local/bin/nexv-ssh 2>/dev/null \
+            || rm -f /usr/local/bin/nexv /usr/local/bin/nexv-ssh 2>/dev/null
+        rm -f "$HOME/.local/bin/nexv" "$HOME/.local/bin/nexv-ssh" 2>/dev/null
         rm -rf "$NEXV_DIR"
-        echo "[*] Done. nexv-ssh has been removed."
+        echo "[*] Done. nexv has been removed."
         exit 0
         ;;
-    --help|-h|help)
-        echo "nexv-ssh - SSH credential finder"
-        echo ""
-        echo "Usage:"
-        echo "  nexv-ssh              Start a new scan (asks: port, username, IP file, password file)"
-        echo "  nexv-ssh continue     Resume an interrupted scan from where it stopped"
-        echo "  nexv-ssh --update     Update to the latest version from GitHub"
-        echo "  nexv-ssh --uninstall  Remove nexv-ssh from this machine"
-        echo "  nexv-ssh --help       Show this help"
+    help|--help|-h|"")
+        show_help
         exit 0
         ;;
     *)
-        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" "$@"
+        echo "Unknown command: $1"
+        echo ""
+        show_help
+        exit 1
         ;;
 esac
 EOF
 chmod +x "$LAUNCHER"
+
+# Remove any old 'nexv-ssh' command from the previous naming.
+$SUDO rm -f "$BIN_DIR/nexv-ssh" 2>/dev/null || true
+rm -f "$HOME/.local/bin/nexv-ssh" 2>/dev/null || true
 
 if [ -w "$BIN_DIR" ] || [ -n "$SUDO" ]; then
     $SUDO ln -sf "$LAUNCHER" "$BIN_DIR/$CMD_NAME"
@@ -159,11 +178,11 @@ fi
 echo ""
 say "${BOLD}Done!${END} Installed as: ${BOLD}${CMD_NAME}${END}  (${TARGET})"
 echo ""
-echo -e "Run it with:   ${BOLD}${CMD_NAME}${END}"
-echo "It will ask for: SSH port, username, IP file, password file."
+echo -e "Start a scan:   ${BOLD}nexv start${END}"
+echo "It will ask for: SSH port, username, IP file, password file, parallel count."
 echo ""
 echo "Other commands:"
-echo -e "  ${BOLD}${CMD_NAME} continue${END}     resume an interrupted scan"
-echo -e "  ${BOLD}${CMD_NAME} --update${END}     update to the latest version"
-echo -e "  ${BOLD}${CMD_NAME} --uninstall${END}  remove nexv-ssh"
+echo -e "  ${BOLD}nexv continue${END}    resume an interrupted scan"
+echo -e "  ${BOLD}nexv update${END}      update to the latest version"
+echo -e "  ${BOLD}nexv uninstall${END}   remove nexv"
 echo ""

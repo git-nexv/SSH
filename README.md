@@ -1,4 +1,4 @@
-# nexv-ssh
+# nexv
 
 A small Linux terminal tool that finds **which password opens which of your SSH servers**.
 
@@ -21,7 +21,7 @@ on each one" situation.
 curl -fsSL https://raw.githubusercontent.com/git-nexv/SSH/main/install.sh | bash
 ```
 
-This installs Python + paramiko and registers the command `nexv-ssh`.
+This installs the engine and registers the command `nexv`.
 
 ---
 
@@ -43,10 +43,10 @@ This installs Python + paramiko and registers the command `nexv-ssh`.
    changeme
    ```
 
-2. Run the program:
+2. Start a scan:
 
    ```bash
-   nexv-ssh
+   nexv start
    ```
 
 3. It will ask you:
@@ -54,6 +54,8 @@ This installs Python + paramiko and registers the command `nexv-ssh`.
    - **SSH username** (press Enter for `root`)
    - **IP list file** (e.g. `ip.txt`)
    - **Password list file** (e.g. `password.txt`)
+   - **How many servers to check at the same time** — higher = faster. Default
+     is all of them at once; as each server finishes, the next one starts.
    - Then press `y` to start.
 
 4. When it finishes, you get a report like:
@@ -85,19 +87,21 @@ If your SSH session drops, the server reboots, or you close the terminal in the
 middle of a scan, just reopen the terminal and run:
 
 ```bash
-nexv-ssh continue
+nexv continue
 ```
 
 It picks up where it left off — servers that were already finished are skipped,
 and the server that was in progress resumes from the exact password it was on,
 so you never have to start over.
 
-## Update & Uninstall
+## Commands
 
 ```bash
-nexv-ssh --update      # pull the latest version from GitHub
-nexv-ssh --uninstall   # remove nexv-ssh from this machine
-nexv-ssh --help        # show all commands
+nexv start       # start a new scan
+nexv continue    # resume an interrupted scan
+nexv update      # pull the latest version from GitHub
+nexv uninstall   # remove nexv from this machine
+nexv help        # show all commands
 ```
 
 ## How it works
@@ -124,10 +128,11 @@ Dead or filtered servers are skipped instantly instead of waiting out a timeout
 on every password, and live servers usually answer each password in well under a
 second.
 
-Tune with environment variables:
+The number of servers scanned in parallel is asked as the last question when
+you run `nexv start` (higher = faster; as each server finishes, the next starts).
 
-- `NEXV_WORKERS` — how many servers to scan in parallel (default `100`; actual
-  is capped to the number of servers, so all of them run at once).
+Other settings via environment variables:
+
 - `NEXV_TIMEOUT` — per-attempt connect/auth timeout in seconds (default `4`).
 - `NEXV_PROBE` — TCP port-probe timeout in seconds (default `min(timeout, 2)`).
 - `NO_COLOR=1` — disable colored output.
@@ -135,7 +140,7 @@ Tune with environment variables:
 Example (very fast, aggressive timeouts):
 
 ```bash
-NEXV_WORKERS=100 NEXV_TIMEOUT=3 NEXV_PROBE=1 nexv-ssh
+NEXV_TIMEOUT=3 NEXV_PROBE=1 nexv start
 ```
 
 > Lower timeouts are faster but, on distant/high-latency servers, can miss a
@@ -154,6 +159,6 @@ NEXV_WORKERS=100 NEXV_TIMEOUT=3 NEXV_PROBE=1 nexv-ssh
 ## Uninstall
 
 ```bash
-sudo rm -f /usr/local/bin/nexv-ssh ~/.local/bin/nexv-ssh
+sudo rm -f /usr/local/bin/nexv ~/.local/bin/nexv
 rm -rf ~/.nexv-ssh
 ```

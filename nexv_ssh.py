@@ -41,7 +41,7 @@ if not USE_SSHPASS:
     except ImportError:
         sys.stderr.write(
             "\n[!] Neither 'sshpass' nor 'paramiko' is available.\n"
-            "    Re-run the nexv-ssh installer, or install one of:\n"
+            "    Re-run the nexv installer, or install one of:\n"
             "      - sshpass + openssh-client   (recommended)\n"
             "      - pip3 install paramiko\n\n"
         )
@@ -253,7 +253,7 @@ def banner():
   | | | |  __/>  <  \ V /    \__ \__ \ __ |
   |_| |_|\___/_/\_\  \_/     |___/___/_||_|
 """ + C.END)
-    log(C.DIM + "        nexv-ssh  ·  SSH credential finder" + C.END)
+    log(C.DIM + "        nexv  ·  SSH credential finder" + C.END)
     log(C.DIM + "        Use only on servers you own or are authorized to test." + C.END)
     log("")
 
@@ -447,7 +447,7 @@ def _rec_to_result(host, rec):
     return {"host": host, "status": "notfound"}
 
 
-def do_scan(port, username, ips, passwords, state, resume=False):
+def do_scan(port, username, ips, passwords, state, resume=False, workers=None):
     """Scan the pending hosts (optionally resuming), return all results."""
     results = []
     pending = []                 # list of (host, start_idx)
@@ -468,7 +468,8 @@ def do_scan(port, username, ips, passwords, state, resume=False):
             pending.append((host, start_idx))
 
     total = len(ips) * len(passwords)
-    workers = max(1, min(MAX_WORKERS, len(pending) or 1))
+    requested = workers if workers else MAX_WORKERS
+    workers = max(1, min(requested, len(pending) or 1))
     log("")
     log("{}Summary{}".format(C.BOLD, C.END))
     log("  Port       : {}".format(port))
@@ -490,11 +491,11 @@ def do_scan(port, username, ips, passwords, state, resume=False):
 
     confirm = ask("Start scanning? (y/n)", "y").lower()
     if confirm not in ("y", "yes"):
-        log(C.Y + "Cancelled. Progress is saved; run 'nexv-ssh continue' to resume." + C.END)
+        log(C.Y + "Cancelled. Progress is saved; run 'nexv continue' to resume." + C.END)
         sys.exit(0)
 
     log("")
-    log(C.DIM + "Scanning... (progress is saved; you can resume with 'nexv-ssh continue')" + C.END)
+    log(C.DIM + "Scanning... (progress is saved; you can resume with 'nexv continue')" + C.END)
     log("")
 
     started = datetime.now()
@@ -594,6 +595,20 @@ def ask_port(default="22"):
     return port
 
 
+def ask_int(prompt, default, lo=1, hi=None):
+    raw = ask(prompt, default)
+    try:
+        val = int(raw)
+    except ValueError:
+        log(C.Y + "[!] '{}' is not a number; using {}.".format(raw, default) + C.END)
+        val = int(default)
+    if val < lo:
+        val = lo
+    if hi is not None and val > hi:
+        val = hi
+    return val
+
+
 def run_fresh():
     """Start a brand-new scan (asks for everything), saving progress as it goes."""
     port = ask_port()
@@ -610,15 +625,24 @@ def run_fresh():
         log(C.R + "[!] No passwords found in {}".format(pw_file) + C.END)
         sys.exit(1)
 
+    # How many servers to check at the same time. More = faster (as each server
+    # finishes, the next one starts automatically). Default: all of them at once.
+    default_workers = min(MAX_WORKERS, len(ips))
+    workers = ask_int(
+        "How many servers to check at the same time", default_workers,
+        lo=1, hi=len(ips))
+
     state = State()
     state.init_fresh({
         "port": port,
         "username": username,
         "ip_file": os.path.abspath(ip_file),
         "pw_file": os.path.abspath(pw_file),
+        "workers": workers,
     })
 
-    results, elapsed = do_scan(port, username, ips, passwords, state, resume=False)
+    results, elapsed = do_scan(port, username, ips, passwords, state,
+                              resume=False, workers=workers)
     report(port, username, ips, results, elapsed)
 
 
@@ -627,7 +651,7 @@ def run_resume():
     state = State()
     if not state.exists():
         log(C.Y + "[!] No saved progress found." + C.END)
-        log("    Start a new scan first with:  " + C.BOLD + "nexv-ssh" + C.END)
+        log("    Start a new scan first with:  " + C.BOLD + "nexv start" + C.END)
         sys.exit(1)
     try:
         state.load()
@@ -640,6 +664,7 @@ def run_resume():
     username = cfg.get("username", "root")
     ip_file = cfg.get("ip_file", "ip.txt")
     pw_file = cfg.get("pw_file", "password.txt")
+    workers = cfg.get("workers")
 
     log(C.DIM + "Resuming previous scan:" + C.END)
     log("  IP file       : {}".format(ip_file))
@@ -648,7 +673,7 @@ def run_resume():
     for label, path in (("IP", ip_file), ("Password", pw_file)):
         if not os.path.isfile(path):
             log(C.R + "[!] {} file no longer exists: {}".format(label, path) + C.END)
-            log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv-ssh" + C.END)
+            log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv start" + C.END)
             sys.exit(1)
 
     ips = load_lines(ip_file)
@@ -657,7 +682,8 @@ def run_resume():
         log(C.R + "[!] IP or password file is now empty." + C.END)
         sys.exit(1)
 
-    results, elapsed = do_scan(port, username, ips, passwords, state, resume=True)
+    results, elapsed = do_scan(port, username, ips, passwords, state,
+                              resume=True, workers=workers)
     report(port, username, ips, results, elapsed)
 
 
