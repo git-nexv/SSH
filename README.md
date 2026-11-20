@@ -102,18 +102,28 @@ A live status line shows progress while scanning:
 passwords[11/50] ips[10/100] | 85.214.203.149 → Summer2023 | matched 3
 ```
 
-Speed/behavior can be tuned with environment variables:
+**Speed:** before trying any password, each server gets a fast TCP port probe.
+Dead or filtered servers are skipped instantly instead of waiting out a timeout
+on every password, and live servers usually answer each password in well under a
+second.
+
+Tune with environment variables:
 
 - `NEXV_WORKERS` — how many servers to scan in parallel (default `100`; actual
   is capped to the number of servers, so all of them run at once).
-- `NEXV_TIMEOUT` — per-attempt connect/auth timeout in seconds (default `6`).
+- `NEXV_TIMEOUT` — per-attempt connect/auth timeout in seconds (default `4`).
+- `NEXV_PROBE` — TCP port-probe timeout in seconds (default `min(timeout, 2)`).
 - `NO_COLOR=1` — disable colored output.
 
-Example (fast, short timeout):
+Example (very fast, aggressive timeouts):
 
 ```bash
-NEXV_WORKERS=100 NEXV_TIMEOUT=5 nexv-ssh
+NEXV_WORKERS=100 NEXV_TIMEOUT=3 NEXV_PROBE=1 nexv-ssh
 ```
+
+> Lower timeouts are faster but, on distant/high-latency servers, can miss a
+> valid password if the handshake doesn't finish in time. `3`–`4`s is a good
+> balance; drop to `1`–`2`s only for nearby/fast servers.
 
 > Passwords are tried **one at a time per server** (not in parallel on the same
 > server) on purpose, to avoid triggering account lockouts or IP bans.

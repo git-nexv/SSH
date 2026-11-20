@@ -61,10 +61,14 @@ class C:
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
     C.off()
 
-# Default connection tuning (override with env vars NEXV_WORKERS / NEXV_TIMEOUT)
-CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "6"))   # TCP/SSH connect timeout (s)
-AUTH_TIMEOUT = CONNECT_TIMEOUT                               # auth timeout (s)
-MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "100"))    # max servers in parallel (cap)
+# Default connection tuning (override with env vars)
+#   NEXV_TIMEOUT  - per-attempt connect/auth timeout, seconds (default 4)
+#   NEXV_PROBE    - fast TCP port-probe timeout, seconds   (default min(timeout,2))
+#   NEXV_WORKERS  - max servers scanned in parallel        (default 100)
+CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "4"))
+AUTH_TIMEOUT = CONNECT_TIMEOUT
+PROBE_TIMEOUT = float(os.environ.get("NEXV_PROBE", str(min(CONNECT_TIMEOUT, 2))))
+MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "100"))
 RETRY_UNREACHABLE = 1      # retry count when the host times out / resets
 
 _print_lock = threading.Lock()
@@ -191,6 +195,16 @@ def load_lines(path):
     return out
 
 
+def host_is_open(host, port, timeout):
+    """Fast TCP probe: is the SSH port reachable at all? Skips dead hosts
+    instantly instead of waiting out a full SSH/auth timeout on each password."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def _try_password_sshpass(host, port, username, password):
     """Authenticate using the OpenSSH client driven by sshpass."""
     cmd = [
@@ -203,6 +217,7 @@ def _try_password_sshpass(host, port, username, password):
         "-o", "NumberOfPasswordPrompts=1",
         "-o", "PreferredAuthentications=password,keyboard-interactive",
         "-o", "PubkeyAuthentication=no",
+        "-o", "GSSAPIAuthentication=no",
         "-o", "LogLevel=ERROR",
         "-p", str(port),
         "{}@{}".format(username, host),
@@ -213,7 +228,7 @@ def _try_password_sshpass(host, port, username, password):
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            timeout=CONNECT_TIMEOUT + AUTH_TIMEOUT + 5,
+            timeout=CONNECT_TIMEOUT + 3,
         )
     except subprocess.TimeoutExpired:
         return "ERR:timeout"
@@ -282,6 +297,13 @@ def try_password(host, port, username, password):
 
 def scan_host(host, port, username, passwords, progress):
     """Try each password against one host; stop at the first that works."""
+    # Fast pre-check: if the port isn't even open, don't waste any attempts.
+    if not host_is_open(host, port, PROBE_TIMEOUT):
+        progress.emit("{}[x] UNREACH{} {}{:<16}{}  (port closed / no response)".format(
+            C.R, C.END, C.DIM, host, C.END))
+        progress.host_done()
+        return {"host": host, "status": "unreachable", "error": "port closed/timeout"}
+
     unreachable_streak = 0
     for idx, pw in enumerate(passwords, 1):
         progress.trying(host, idx, pw)
@@ -343,7 +365,7 @@ def main():
     log("  Passwords  : {}".format(len(passwords)))
     log("  Max checks : {} (stops at first match per server)".format(total))
     log("  Parallel   : {} servers at once".format(workers))
-    log("  Timeout    : {}s per attempt".format(CONNECT_TIMEOUT))
+    log("  Timeout    : {}s per attempt  (TCP probe {}s)".format(CONNECT_TIMEOUT, PROBE_TIMEOUT))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
     log("")
 
