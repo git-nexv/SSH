@@ -114,14 +114,19 @@ nexv help        # show all commands
 
 ## Notes & tuning
 
-A live status line shows elapsed time and progress while scanning:
+While scanning, each server being checked gets its own live row (one per
+parallel worker), updating independently, with a summary line underneath:
 
 ```
-[01:23] passwords[11/50] ips[10/100] | 85.214.203.149 → Summer2023 | matched 3
+[01:23] 94.72.104.95     passwords[4/1000]  → raspberry
+[01:23] 85.214.203.149   passwords[12/1000] → Summer2023
+[01:23] 203.0.113.5      passwords[7/1000]  → changeme
+── ips[10/100]  ·  matched 3  ·  3 scanning ──
 ```
 
-The `[MM:SS]` timer updates every second so you can see exactly how long the
-scan is taking; the total time is also printed at the end.
+When a server finishes it prints a permanent MATCH / NONE / UNREACH line above
+the live rows, and the freed row moves on to the next server. The `[MM:SS]`
+timer updates every second; the total time is also printed at the end.
 
 **Speed:** before trying any password, each server gets a fast TCP port probe.
 Dead or filtered servers are skipped instantly instead of waiting out a timeout

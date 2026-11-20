@@ -92,28 +92,35 @@ def _term_width():
         return 100
 
 
-class Progress:
-    """Thread-safe live status line + permanent result lines."""
+MAX_LIVE_ROWS = 20   # cap how many per-IP live rows are shown at once
 
-    def __init__(self, total_ips, total_pw):
+
+class Progress:
+    """Thread-safe live display: one status row per concurrently-scanned IP,
+    stacked vertically, plus a summary row. Finished servers print a permanent
+    result line above the live block."""
+
+    def __init__(self, total_ips, total_pw, workers=1):
         self.total_ips = total_ips
         self.total_pw = total_pw
         self.ips_done = 0
         self.found = 0
-        self.last_ip = "-"
-        self.last_pw_idx = 0
-        self.last_pw = "-"
         self.lock = threading.Lock()
-        self.active = sys.stdout.isatty()
+        self.active_tty = sys.stdout.isatty()
         self.start_time = None
         self._ticker = None
         self._stop = False
+        self._drawn = 0                      # live rows currently on screen
+        # one visible row per parallel worker, capped for sanity
+        self.slots_count = max(1, min(workers, total_ips, MAX_LIVE_ROWS))
+        self.slots = [None] * self.slots_count   # slot index -> host
+        self.slot_of = {}                        # host -> slot index
+        self.active = {}                         # host -> (pw_idx, pw)
 
+    # ---- timer / background refresh ----
     def start_timer(self):
-        """Begin the elapsed clock and a background thread that refreshes the
-        timer every second even while no attempt has finished."""
         self.start_time = time.time()
-        if self.active:
+        if self.active_tty:
             self._stop = False
             self._ticker = threading.Thread(target=self._tick, daemon=True)
             self._ticker.start()
@@ -124,7 +131,7 @@ class Progress:
             with self.lock:
                 if self._stop:
                     break
-                self._render_nolock()
+                self._repaint_nolock()
 
     def _elapsed_str(self):
         if not self.start_time:
@@ -132,55 +139,97 @@ class Progress:
         s = int(time.time() - self.start_time)
         return "{:02d}:{:02d}".format(s // 60, s % 60)
 
-    def _render_nolock(self):
-        if not self.active:
+    # ---- slot bookkeeping ----
+    def _assign_slot(self, host):
+        if host in self.slot_of:
             return
-        pw = self.last_pw
-        if len(pw) > 32:
-            pw = pw[:29] + "..."
-        line = (
-            "{d}[{t}]{e} "
-            "{b}passwords[{pi}/{pt}]{e} "
-            "{b}ips[{ii}/{it}]{e} | "
-            "{cy}{ip}{e} → {y}{pw}{e} | "
-            "{g}matched {f}{e}"
-        ).format(
-            d=C.DIM, t=self._elapsed_str(), b=C.BOLD, e=C.END,
-            cy=C.CY, y=C.Y, g=C.G,
-            pi=self.last_pw_idx, pt=self.total_pw,
-            ii=self.ips_done, it=self.total_ips,
-            ip=self.last_ip, pw=pw, f=self.found,
-        )
-        sys.stdout.write("\r\033[K" + line)
+        for i in range(self.slots_count):
+            if self.slots[i] is None:
+                self.slots[i] = host
+                self.slot_of[host] = i
+                return
+
+    def _free_slot(self, host):
+        i = self.slot_of.pop(host, None)
+        if i is None:
+            return
+        self.slots[i] = None
+        # promote another active host that has no visible row yet
+        for h in self.active:
+            if h not in self.slot_of:
+                self.slots[i] = h
+                self.slot_of[h] = i
+                break
+
+    # ---- rendering ----
+    def _build_block(self):
+        t = self._elapsed_str()
+        rows = []
+        for i in range(self.slots_count):
+            host = self.slots[i]
+            if host is not None and host in self.active:
+                idx, pw = self.active[host]
+                if len(pw) > 24:
+                    pw = pw[:21] + "..."
+                rows.append(
+                    "{d}[{t}]{e} {cy}{host:<15}{e} {b}passwords[{i}/{n}]{e} → {y}{pw}{e}".format(
+                        d=C.DIM, t=t, e=C.END, cy=C.CY, host=host,
+                        b=C.BOLD, i=idx, n=self.total_pw, y=C.Y, pw=pw))
+            else:
+                rows.append("{d}[{t}] ...{e}".format(d=C.DIM, t=t, e=C.END))
+        rows.append(
+            "{d}── ips[{a}/{b}]  ·  matched {f}  ·  {k} scanning ──{e}".format(
+                d=C.DIM, a=self.ips_done, b=self.total_ips,
+                f=self.found, k=len(self.active), e=C.END))
+        return rows
+
+    def _repaint_nolock(self, permanent=None):
+        if not self.active_tty:
+            if permanent is not None:
+                print(permanent, flush=True)
+            return
+        out = []
+        if self._drawn:
+            out.append("\033[{}F".format(self._drawn))   # cursor up to block top
+        if permanent is not None:
+            out.append("\033[2K" + permanent + "\n")
+        for row in self._build_block():
+            out.append("\033[2K" + row + "\n")
+        self._drawn = self.slots_count + 1
+        sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    def trying(self, ip, pw_idx, pw):
+    # ---- public API ----
+    def trying(self, host, pw_idx, pw):
         with self.lock:
-            self.last_ip = ip
-            self.last_pw_idx = pw_idx
-            self.last_pw = pw
-            self._render_nolock()
+            self.active[host] = (pw_idx, pw)
+            self._assign_slot(host)
+            self._repaint_nolock()
 
-    def host_done(self, found=False):
+    def host_done(self, host, msg=None, found=False):
         with self.lock:
+            self.active.pop(host, None)
+            self._free_slot(host)
             self.ips_done += 1
             if found:
                 self.found += 1
-            self._render_nolock()
+            self._repaint_nolock(permanent=msg)
 
     def emit(self, msg):
-        """Print a permanent line above the live status line."""
+        """Print a permanent line above the live block."""
         with self.lock:
-            if self.active:
-                sys.stdout.write("\r\033[K")
-            print(msg, flush=True)
-            self._render_nolock()
+            self._repaint_nolock(permanent=msg)
 
     def finish(self):
         with self.lock:
             self._stop = True
-            if self.active:
-                sys.stdout.write("\r\033[K")
+            if self.active_tty and self._drawn:
+                out = ["\033[{}F".format(self._drawn)]
+                for _ in range(self._drawn):
+                    out.append("\033[2K\n")
+                out.append("\033[{}F".format(self._drawn))
+                self._drawn = 0
+                sys.stdout.write("".join(out))
                 sys.stdout.flush()
 
 
@@ -399,10 +448,9 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
     """
     # Fast pre-check: if the port isn't even open, don't waste any attempts.
     if not host_is_open(host, port, PROBE_TIMEOUT):
-        progress.emit("{}[x] UNREACH{} {}{:<16}{}  (port closed / no response)".format(
-            C.R, C.END, C.DIM, host, C.END))
         state.set_done(host, "unreachable", error="port closed/timeout")
-        progress.host_done()
+        progress.host_done(host, "{}[x] UNREACH{} {}{:<16}{}  (port closed / no response)".format(
+            C.R, C.END, C.DIM, host, C.END))
         return {"host": host, "status": "unreachable", "error": "port closed/timeout"}
 
     unreachable_streak = 0
@@ -414,26 +462,23 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
         state.set_inprogress(host, idx)
         result = try_password(host, port, username, pw)
         if result is True:
-            progress.emit("{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
-                C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, pw, C.END))
             state.set_done(host, "found", password=pw)
-            progress.host_done(found=True)
+            progress.host_done(host, "{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
+                C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, pw, C.END), found=True)
             return {"host": host, "status": "found", "password": pw}
         if isinstance(result, str) and result.startswith("ERR:"):
             unreachable_streak += 1
             # If the very first attempts can't even connect, the host is down.
             if unreachable_streak > RETRY_UNREACHABLE and unreachable_streak >= 2:
-                progress.emit("{}[x] UNREACH{} {}{:<16}{}  ({})".format(
-                    C.R, C.END, C.DIM, host, C.END, result[4:]))
                 state.set_done(host, "unreachable", error=result[4:])
-                progress.host_done()
+                progress.host_done(host, "{}[x] UNREACH{} {}{:<16}{}  ({})".format(
+                    C.R, C.END, C.DIM, host, C.END, result[4:]))
                 return {"host": host, "status": "unreachable", "error": result[4:]}
         else:
             unreachable_streak = 0
-    progress.emit("{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
-        C.Y, C.END, C.DIM, host, C.END))
     state.set_done(host, "notfound")
-    progress.host_done()
+    progress.host_done(host, "{}[-] NONE{}   {}{:<16}{}  (no password matched)".format(
+        C.Y, C.END, C.DIM, host, C.END))
     return {"host": host, "status": "notfound"}
 
 
@@ -499,7 +544,7 @@ def do_scan(port, username, ips, passwords, state, resume=False, workers=None):
     log("")
 
     started = datetime.now()
-    progress = Progress(len(ips), len(passwords))
+    progress = Progress(len(ips), len(passwords), workers)
     progress.ips_done = done_count
     progress.found = found_count
     progress.start_timer()
@@ -509,11 +554,11 @@ def do_scan(port, username, ips, passwords, state, resume=False, workers=None):
             for host, sidx in pending
         }
         for fut in as_completed(futures):
+            host = futures[fut]
             try:
                 results.append(fut.result())
             except Exception as e:  # noqa
-                host = futures[fut]
-                progress.emit(C.R + "[!] Error scanning {}: {}".format(host, e) + C.END)
+                progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END)
                 results.append({"host": host, "status": "error", "error": str(e)})
 
     progress.finish()
