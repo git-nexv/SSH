@@ -148,6 +148,9 @@ When you start a scan it also asks **"Run in background?"**. Answer `y` and the
 scan detaches so the whole terminal is free; then use `nexv status`, `nexv retry`
 and `nexv stop` as normal commands. Background output goes to `~/.nexv-ssh/scan.log`.
 
+A background scan keeps running **even if you close the terminal or disconnect
+your SSH session** — reconnect later and `nexv status` shows where it got to.
+
 **`nexv retry`** re-tries the servers that failed (connection reset / timeout /
 refused) without disturbing the ones already done. It also works against a scan
 still running (foreground in another terminal, or a background scan).

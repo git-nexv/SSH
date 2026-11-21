@@ -872,9 +872,13 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
             log(C.DIM + "  log: {}".format(SCAN_LOG) + C.END)
             log("")
             return None, None
-        # Child: detach from the terminal and send output to the log file.
+        # Child: fully detach so it keeps running after the terminal closes.
         try:
-            os.setsid()
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)   # survive terminal close
+        except Exception:  # noqa
+            pass
+        try:
+            os.setsid()                      # new session, no controlling terminal
         except Exception:  # noqa
             pass
         try:
