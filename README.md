@@ -124,10 +124,24 @@ nexv uninstall   # remove nexv from this machine
 nexv help        # show the full menu
 ```
 
+### The scan always keeps running after you close the terminal
+
+The scan itself runs **detached** in the background, so closing the terminal or
+dropping your SSH session never stops it. When you start a scan it asks
+**"Watch the scan live now?"**:
+
+- **yes** — you get the live full-screen view right away (and can type commands).
+- **no** — it just runs; reattach any time with `nexv status`.
+
+`nexv status` re-opens that same live full-screen view of the running scan — every
+server being checked, the password being tried, and the matches found so far. If
+you run `nexv retry`, the servers it re-tries reappear among the ones being
+scanned on that screen. Press Ctrl-C (or type `quit`) to stop watching **without**
+stopping the scan.
+
 ### Watch live AND type commands at the same time
 
-While a scan runs in the foreground you still see the live display, and there is
-a command line at the bottom:
+On the live screen there is a command line at the bottom:
 
 ```
 [01:23] 94.72.104.95     passwords[4/1000]  → raspberry
@@ -138,22 +152,16 @@ a command line at the bottom:
 
 Type a command there and press Enter — it does **not** erase your typing:
 
-- `retry`  — re-try the servers that errored (right now, alongside the scan)
-- `status` — print a one-line summary
-- `stop`   — stop the scan (progress is saved; resume with `nexv continue`)
+- `retry` — re-try the servers that errored (right now, alongside the scan)
+- `stop`  — stop the scan (progress is saved; resume with `nexv continue`)
+- `quit`  — stop watching, but let the scan keep running
 
-### Or run it in the background
-
-When you start a scan it also asks **"Run in background?"**. Answer `y` and the
-scan detaches so the whole terminal is free; then use `nexv status`, `nexv retry`
-and `nexv stop` as normal commands. Background output goes to `~/.nexv-ssh/scan.log`.
-
-A background scan keeps running **even if you close the terminal or disconnect
-your SSH session** — reconnect later and `nexv status` shows where it got to.
+You can also drive it from any other terminal with `nexv retry` / `nexv stop`.
+Full output of each scan is also written to `~/.nexv-ssh/scan.log`.
 
 **`nexv retry`** re-tries the servers that failed (connection reset / timeout /
-refused) without disturbing the ones already done. It also works against a scan
-still running (foreground in another terminal, or a background scan).
+refused) without disturbing the ones already done — the retried servers reappear
+among the ones being scanned on the live screen.
 
 ## How it works
 

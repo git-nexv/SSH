@@ -121,15 +121,16 @@ show_help() {
     printf '  %s%s%s\n' "$D" "$line" "$R"
     printf '    %s%-15s%s %s\n' "$B" "nexv start"     "$R" "Start a new scan (asks the questions below)"
     printf '    %s%-15s%s %s\n' "$B" "nexv continue"  "$R" "Resume an interrupted scan where it stopped"
-    printf '    %s%-15s%s %s\n' "$B" "nexv status"    "$R" "Show progress and matches of the current scan"
+    printf '    %s%-15s%s %s\n' "$B" "nexv status"    "$R" "Watch the running scan live (full screen)"
     printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan)"
     printf '    %s%-15s%s %s\n' "$B" "nexv stop"      "$R" "Stop a scan that is currently running"
     printf '    %s%-15s%s %s\n' "$B" "nexv update"    "$R" "Update to the latest version from GitHub"
     printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
     printf '    %s%-15s%s %s\n' "$B" "nexv help"      "$R" "Show this menu"
     printf '\n'
-    printf '    %sTip: during a scan you can type %sretry%s%s / %sstatus%s%s / %sstop%s%s right%s\n' "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$R"
-    printf '    %son the live screen and press Enter. Or run it in the background.%s\n' "$D" "$R"
+    printf '    %sThe scan keeps running even if you close the terminal. On the live%s\n' "$D" "$R"
+    printf '    %sscreen you can type %sretry%s%s / %sstop%s%s / %squit%s%s and press Enter, or%s\n' "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$R"
+    printf '    %sreattach any time with %snexv status%s%s.%s\n' "$D" "$B" "$R" "$D" "$R"
     printf '\n'
 
     printf '  %s%sWHAT "nexv start" ASKS%s\n' "$C" "$B" "$R"

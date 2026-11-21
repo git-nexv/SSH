@@ -331,6 +331,23 @@ class Progress:
             self.input_buffer = buf
             self._repaint_nolock()
 
+    def show_snapshot(self, active_list, ips_done, found, failed):
+        """Drive the live display from an external snapshot (used by the viewer
+        that reads a detached scan's state). active_list is a list of
+        (host, human_idx, shown_password) for the servers currently scanning."""
+        with self.lock:
+            self.ips_done = ips_done
+            self.found = found
+            self.failed = failed
+            self.active = {}
+            self.slots = [None] * self.slots_count
+            self.slot_of = {}
+            for i, (host, idx1, pw) in enumerate(active_list[:self.slots_count]):
+                self.active[host] = (idx1, pw)
+                self.slots[i] = host
+                self.slot_of[host] = i
+            self._repaint_nolock()
+
     def _repaint_nolock(self, permanent=None):
         if not self.active_tty:
             if permanent is not None:
@@ -853,24 +870,31 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
 
     # Offer to run in the background so the terminal stays free for other
     # commands (nexv status / retry / stop) while the scan runs.
-    background = False
-    if ask_background and hasattr(os, "fork") and sys.stdout.isatty():
-        ans = ask("Run in background so you can keep typing commands? (y/n)", "n").lower()
-        background = ans in ("y", "yes")
-
-    if background:
+    #
+    # The scan ALWAYS runs detached so it survives the terminal closing. The
+    # parent then either attaches a live viewer (watch) or just prints how to
+    # drive it. (retry passes ask_background=False and stays in-process.)
+    detach = ask_background and hasattr(os, "fork")
+    if detach:
+        watch = True
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            watch = ask("Watch the scan live now? (y/n)", "y").lower() in ("y", "yes")
         sys.stdout.flush()
         sys.stderr.flush()
         pid = os.fork()
         if pid > 0:
-            # Parent: tell the user how to drive the background scan, then exit.
-            log("")
-            log(C.G + C.BOLD + "Scan started in the background (pid {}).".format(pid) + C.END)
-            log("  " + C.BOLD + "nexv status" + C.END + "   see progress and matches so far")
-            log("  " + C.BOLD + "nexv retry" + C.END + "    re-try the servers that errored")
-            log("  " + C.BOLD + "nexv stop" + C.END + "     stop it (progress is saved)")
-            log(C.DIM + "  log: {}".format(SCAN_LOG) + C.END)
-            log("")
+            # Parent: watch live (viewer) or just report where it is.
+            if watch and sys.stdin.isatty() and sys.stdout.isatty():
+                time.sleep(0.4)      # let the child record its pid / first state
+                run_viewer(default_ports, portlists, usernames, ips, passwords)
+            else:
+                log("")
+                log(C.G + C.BOLD + "Scan running in the background (pid {}).".format(pid) + C.END)
+                log("  " + C.BOLD + "nexv status" + C.END + "   watch it live")
+                log("  " + C.BOLD + "nexv retry" + C.END + "    re-try the servers that errored")
+                log("  " + C.BOLD + "nexv stop" + C.END + "     stop it (progress is saved)")
+                log(C.DIM + "  log: {}".format(SCAN_LOG) + C.END)
+                log("")
             return None, None
         # Child: fully detach so it keeps running after the terminal closes.
         try:
@@ -891,16 +915,17 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
         except Exception:  # noqa
             pass
         log("")
-        log("=== background scan started {} ===".format(datetime.now().isoformat()))
+        log("=== scan started {} ===".format(datetime.now().isoformat()))
 
-    interactive = (not background) and sys.stdin.isatty() and sys.stdout.isatty()
-    if not background:
+    # The detached child is never interactive (its stdout is the log file).
+    interactive = (not detach) and sys.stdin.isatty() and sys.stdout.isatty()
+    if not detach:
         log("")
         if interactive:
-            log(C.DIM + "Scanning... type a command below and press Enter: "
-                + C.BOLD + "retry" + C.END + C.DIM + " (re-try failed) · "
+            log(C.DIM + "Scanning... type a command and press Enter: "
+                + C.BOLD + "retry" + C.END + C.DIM + " · "
                 + C.BOLD + "status" + C.END + C.DIM + " · "
-                + C.BOLD + "stop" + C.END + C.DIM + "   (progress is saved)" + C.END)
+                + C.BOLD + "stop" + C.END + C.DIM + C.END)
         else:
             log(C.DIM + "Scanning... (progress saved; resume with 'nexv continue')" + C.END)
         log("")
@@ -1013,26 +1038,24 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
     return list(results_by_host.values()), elapsed
 
 
-def report(default_ports, portlists, usernames, ips, results, elapsed):
+def print_results(default_ports, portlists, usernames, ips, results, header=True):
+    """Print the MATCHED / NONE / UNREACHABLE sections. Returns
+    (found, notfound, unreachable, pof)."""
     def pof(r):
-        # Actual matched port if known, else the host's first candidate port.
         return r.get("port") or (portlists.get(r["host"]) or default_ports)[0]
 
-    # Keep the report in the same order as the input IP file
     order = {ip: i for i, ip in enumerate(ips)}
-    results.sort(key=lambda r: order.get(r["host"], 1e9))
-
+    results = sorted(results, key=lambda r: order.get(r["host"], 1e9))
     found = [r for r in results if r["status"] == "found"]
     notfound = [r for r in results if r["status"] == "notfound"]
     unreachable = [r for r in results if r["status"] in ("unreachable", "error")]
 
-    # ------------------------- final report ------------------------------
+    if header:
+        log("")
+        log(C.BOLD + "=" * 60 + C.END)
+        log(C.BOLD + " RESULTS" + C.END)
+        log(C.BOLD + "=" * 60 + C.END)
     log("")
-    log(C.BOLD + "=" * 60 + C.END)
-    log(C.BOLD + " RESULTS" + C.END)
-    log(C.BOLD + "=" * 60 + C.END)
-    log("")
-
     if found:
         log(C.G + C.BOLD + "MATCHED SERVERS ({}):".format(len(found)) + C.END)
         log("")
@@ -1043,18 +1066,22 @@ def report(default_ports, portlists, usernames, ips, results, elapsed):
                 C.CY, r["host"], C.END, pof(r),
                 r.get("username", "root"), C.G, r["password"], C.END))
         log("")
-
     if notfound:
         log(C.Y + "NO PASSWORD MATCHED ({}):".format(len(notfound)) + C.END)
         for r in notfound:
             log("  {}".format(r["host"]))
         log("")
-
     if unreachable:
         log(C.R + "UNREACHABLE / ERROR ({}):".format(len(unreachable)) + C.END)
         for r in unreachable:
             log("  {:<18} ({})".format(r["host"], r.get("error", "unknown")))
         log("")
+    return found, notfound, unreachable, pof
+
+
+def report(default_ports, portlists, usernames, ips, results, elapsed):
+    found, notfound, unreachable, pof = print_results(
+        default_ports, portlists, usernames, ips, results)
 
     log(C.DIM + "Done in {:.1f}s  ·  {} matched / {} none / {} unreachable".format(
         elapsed, len(found), len(notfound), len(unreachable)) + C.END)
@@ -1309,59 +1336,123 @@ def _scan_running():
     return None
 
 
+def _results_from_state(recs, ips):
+    out = []
+    for ip in ips:
+        r = recs.get(ip)
+        if r and r.get("status") in ("found", "notfound", "unreachable"):
+            out.append(_rec_to_result(ip, r))
+    return out
+
+
+def run_viewer(default_ports, portlists, usernames, ips, passwords):
+    """Live full-screen view of the running (or last) scan, read from the saved
+    state — shows every server being checked and the password being tried, and
+    lets you type retry / stop / quit. Used by `nexv status` and by a foreground
+    `nexv start` (the scan itself always runs detached)."""
+    creds = [(u, p) for u in usernames for p in passwords]
+    state = State()
+
+    def read_recs():
+        try:
+            state.load()
+        except Exception:  # noqa
+            pass
+        return state.data.get("ips", {})
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+    # Non-interactive (piped) or one-shot: print a snapshot and exit.
+    if not interactive:
+        recs = read_recs()
+        print_results(default_ports, portlists, usernames, ips,
+                      _results_from_state(recs, ips))
+        return
+
+    workers = state.config().get("workers") or min(len(ips), MAX_LIVE_ROWS)
+    progress = Progress(len(ips), len(creds), workers)
+    progress.start_timer()
+    quit_flag = threading.Event()
+
+    def handle_cmd(cmd):
+        c = cmd.lower().strip()
+        if c.startswith("nexv "):
+            c = c[5:].strip()
+        pid = _scan_running()
+        if c in ("retry", "r"):
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGUSR1)
+                    progress.emit(C.Y + "↻ asked the scan to re-try failed servers" + C.END)
+                except Exception:  # noqa
+                    progress.emit(C.R + "could not reach the scan" + C.END)
+            else:
+                progress.emit(C.DIM + "no scan running" + C.END)
+        elif c in ("stop",):
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    progress.emit(C.Y + "■ stop sent to the scan" + C.END)
+                except Exception:  # noqa
+                    pass
+            else:
+                progress.emit(C.DIM + "no scan running" + C.END)
+        elif c in ("quit", "exit", "q"):
+            quit_flag.set()
+        elif c in ("status", "s", ""):
+            pass
+        else:
+            progress.emit(C.Y + "unknown: {}  (retry | stop | quit)".format(cmd) + C.END)
+
+    stop_ev = threading.Event()
+    reader = threading.Thread(target=_input_reader, args=(progress, handle_cmd, stop_ev), daemon=True)
+    reader.start()
+
+    viewer_start = time.time()
+    try:
+        while not quit_flag.is_set():
+            recs = read_recs()
+            active = []
+            for ip in ips:
+                r = recs.get(ip)
+                if r and r.get("status") == "inprogress":
+                    idx = int(r.get("idx", 0))
+                    if 0 <= idx < len(creds):
+                        u, pw = creds[idx]
+                        shown = "{}:{}".format(u, pw) if len(usernames) > 1 else pw
+                    else:
+                        shown = "..."
+                    active.append((ip, idx + 1, shown))
+            found = sum(1 for r in recs.values() if r.get("status") == "found")
+            failed = sum(1 for r in recs.values() if r.get("status") == "unreachable")
+            none_ = sum(1 for r in recs.values() if r.get("status") == "notfound")
+            progress.show_snapshot(active, found + failed + none_, found, failed)
+            # Stop once the scan is gone (give a new detached scan a moment to register).
+            if not _scan_running() and time.time() - viewer_start > 2.5:
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_ev.set()
+        progress.finish()
+
+    recs = read_recs()
+    print_results(default_ports, portlists, usernames, ips, _results_from_state(recs, ips))
+    if _scan_running():
+        log(C.DIM + "Scan still running — 'nexv status' to keep watching." + C.END)
+    elif quit_flag.is_set():
+        log(C.DIM + "Stopped watching. The scan continues if it was running." + C.END)
+
+
 def run_status():
-    """Show a snapshot of the current/last scan from the saved state."""
+    """Attach a live viewer to the current (or last) scan."""
     state = State()
     if not state.exists():
         log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "nexv start" + C.END)
         return
-    try:
-        state.load()
-    except Exception as e:  # noqa
-        log(C.R + "[!] Could not read scan state: {}".format(e) + C.END)
-        return
-
-    cfg = state.config()
-    ip_file = cfg.get("ip_file", "ip.txt")
-    default_ports = cfg.get("ports") or [cfg.get("port", 22)]
-    total = None
-    if os.path.isfile(ip_file):
-        ips, _, _ = build_targets(load_lines(ip_file)[0], default_ports)
-        total = len(ips)
-
-    recs = state.data.get("ips", {})
-    found = [h for h, r in recs.items() if r.get("status") == "found"]
-    none_ = [h for h, r in recs.items() if r.get("status") == "notfound"]
-    failed = [h for h, r in recs.items() if r.get("status") == "unreachable"]
-    inprog = [h for h, r in recs.items() if r.get("status") == "inprogress"]
-    done = len(found) + len(none_) + len(failed)
-    if total is None:
-        total = done + len(inprog)
-    queued = max(0, total - done - len(inprog))
-
-    pid = _scan_running()
-    log("")
-    if pid:
-        log(C.G + C.BOLD + "● Scan running (pid {})".format(pid) + C.END)
-    else:
-        log(C.DIM + "○ No scan running (showing last results)" + C.END)
-    log("  total {}  ·  {}scanning {}{}  ·  done {}  ·  {}matched {}{}  ·  {}failed {}{}  ·  queued {}".format(
-        total, C.CY, len(inprog), C.END, done,
-        C.G, len(found), C.END, C.R, len(failed), C.END, queued))
-    log("")
-    if found:
-        log(C.G + C.BOLD + "MATCHED ({}):".format(len(found)) + C.END)
-        order = {}
-        for h in found:
-            r = recs[h]
-            log("  {}{:<18}{} {:<6} {:<14} {}{}{}".format(
-                C.CY, h, C.END, r.get("port") or default_ports[0],
-                r.get("username", "root"), C.G, r.get("password", ""), C.END))
-        log("")
-    if pid:
-        log(C.DIM + "Commands: nexv retry (re-try failed) · nexv stop · nexv status" + C.END)
-    else:
-        log(C.DIM + "Commands: nexv continue (finish) · nexv retry (re-try failed)" + C.END)
+    _, default_ports, portlists, usernames, ips, passwords, _ = _load_saved_scan()
+    run_viewer(default_ports, portlists, usernames, ips, passwords)
 
 
 def main():
