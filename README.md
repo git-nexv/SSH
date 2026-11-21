@@ -134,8 +134,12 @@ parallel worker), updating independently, with a summary line underneath:
 [01:23] 94.72.104.95     passwords[4/1000]  → raspberry
 [01:23] 85.214.203.149   passwords[12/1000] → Summer2023
 [01:23] 203.0.113.5      passwords[7/1000]  → changeme
-── ips[10/100]  ·  matched 3  ·  3 scanning ──
+── total 100 · 3 scanning · done 10/100 · 3 matched · 2 failed · 87 queued ──
 ```
+
+The summary line shows the whole picture: total servers, how many are being
+checked right now, how many are done, how many matched, how many failed
+(unreachable), and how many are still queued.
 
 When a server finishes it prints a permanent MATCH / NONE / UNREACH line above
 the live rows, and the freed row moves on to the next server. The `[MM:SS]`

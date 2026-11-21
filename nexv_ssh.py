@@ -10,6 +10,7 @@ systems you do not own or have written permission to access.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -83,10 +84,11 @@ RETRIES = int(os.environ.get("NEXV_RETRIES", "3"))
 INTER_DELAY = float(os.environ.get("NEXV_DELAY", "0"))
 RETRY_UNREACHABLE = 1      # consecutive hard failures before marking a host down
 
-# Error markers treated as transient (server is up but throttling us): retried
-# with backoff instead of giving up. 'reset' covers kex_exchange_identification
-# / connection reset by peer, the classic signature of SSH rate-limiting.
-TRANSIENT_ERRORS = ("reset", "timeout")
+# Error markers treated as transient (server is up but throttling/overloading
+# us): retried with backoff instead of giving up. These are all connection-phase
+# failures that typically mean rate-limiting under heavy parallel load, not a
+# truly dead host (the TCP port probe already passed before we got here).
+TRANSIENT_ERRORS = ("reset", "timeout", "closed", "refused")
 
 _print_lock = threading.Lock()
 
@@ -116,6 +118,7 @@ class Progress:
         self.total_pw = total_pw
         self.ips_done = 0
         self.found = 0
+        self.failed = 0
         self.lock = threading.Lock()
         self.active_tty = sys.stdout.isatty()
         self.start_time = None
@@ -189,9 +192,13 @@ class Progress:
             else:
                 rows.append("{d}[{t}] ...{e}".format(d=C.DIM, t=t, e=C.END))
         rows.append(
-            "{d}── ips[{a}/{b}]  ·  matched {f}  ·  {k} scanning ──{e}".format(
-                d=C.DIM, a=self.ips_done, b=self.total_ips,
-                f=self.found, k=len(self.active), e=C.END))
+            ("{d}── total {b}  ·  {cy}{k} scanning{d}  ·  "
+             "done {a}/{b}  ·  {g}{f} matched{d}  ·  {r}{u} failed{d}  ·  "
+             "{q} queued ──{e}").format(
+                d=C.DIM, b=self.total_ips, cy=C.CY, k=len(self.active),
+                a=self.ips_done, g=C.G, f=self.found, r=C.R, u=self.failed,
+                q=max(0, self.total_ips - self.ips_done - len(self.active)),
+                e=C.END))
         return rows
 
     def _repaint_nolock(self, permanent=None):
@@ -217,13 +224,15 @@ class Progress:
             self._assign_slot(host)
             self._repaint_nolock()
 
-    def host_done(self, host, msg=None, found=False):
+    def host_done(self, host, msg=None, found=False, failed=False):
         with self.lock:
             self.active.pop(host, None)
             self._free_slot(host)
             self.ips_done += 1
             if found:
                 self.found += 1
+            if failed:
+                self.failed += 1
             self._repaint_nolock(permanent=msg)
 
     def emit(self, msg):
@@ -436,11 +445,15 @@ def _try_password_sshpass(host, port, username, password):
         return False
     if proc.returncode == 5:            # sshpass: incorrect password
         return False
-    # Server is up but reset us mid-handshake -> rate-limiting / MaxStartups /
-    # fail2ban. Transient: worth retrying with backoff.
+    if "too many authentication failures" in err:
+        return "ERR:too-many-auth"
+    # Server up but closed/reset us mid-handshake -> rate-limiting / MaxStartups
+    # / fail2ban. Transient: worth retrying with backoff.
     if ("kex_exchange_identification" in err or "reset by peer" in err
             or "connection reset" in err):
         return "ERR:reset"
+    if "closed by remote host" in err or "connection closed" in err:
+        return "ERR:closed"
     if "connection refused" in err:
         return "ERR:refused"
     if "timed out" in err or "timeout" in err:
@@ -449,8 +462,13 @@ def _try_password_sshpass(host, port, username, password):
         return "ERR:no-route"
     if "could not resolve" in err or "name or service not known" in err:
         return "ERR:dns"
-    last = err.strip().splitlines()[-1][:40] if err.strip() else "rc{}".format(proc.returncode)
-    return "ERR:" + last
+    # Fallback: surface the REAL ssh reason instead of a useless 'rc255'.
+    # ssh prints: "ssh: connect to host H port P: <reason>".
+    m = re.search(r"port \d+:\s*(.+)", err)
+    if m:
+        return "ERR:" + m.group(1).strip()[:48]
+    first = next((ln.strip() for ln in err.splitlines() if ln.strip()), "")
+    return "ERR:" + (first[:48] if first else "rc{}".format(proc.returncode))
 
 
 def _try_password_paramiko(host, port, username, password):
@@ -510,6 +528,19 @@ def try_password(host, port, username, password):
         return result, attempt
 
 
+def reason_text(err):
+    """Human-readable explanation for an error marker."""
+    return {
+        "reset": "connection reset (rate-limited?)",
+        "closed": "connection closed (rate-limited?)",
+        "refused": "refused (rate-limited? / port closed)",
+        "timeout": "timeout (slow or filtered)",
+        "no-route": "no route to host",
+        "dns": "cannot resolve hostname",
+        "too-many-auth": "too many auth failures (server limit)",
+    }.get(err, err)
+
+
 def fmt_result_line(r):
     """Build the permanent one-line result for a host (MATCH / NONE / UNREACH)."""
     host = r["host"]
@@ -533,7 +564,7 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
     if not host_is_open(host, port, PROBE_TIMEOUT):
         r = {"host": host, "status": "unreachable", "error": "port closed / no response (1 try)"}
         state.set_done(host, "unreachable", error=r["error"])
-        progress.host_done(host, fmt_result_line(r))
+        progress.host_done(host, fmt_result_line(r), failed=True)
         return r
 
     unreachable_streak = 0
@@ -555,12 +586,10 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
             unreachable_streak += 1
             # If the very first attempts can't even connect, the host is down.
             if unreachable_streak > RETRY_UNREACHABLE and unreachable_streak >= 2:
-                err = result[4:]
-                reason = "rate-limited? lower parallelism" if err == "reset" else err
-                note = "{}, {} tries".format(reason, tries)
+                note = "{}, {} tries".format(reason_text(result[4:]), tries)
                 r = {"host": host, "status": "unreachable", "error": note}
                 state.set_done(host, "unreachable", error=note)
-                progress.host_done(host, fmt_result_line(r))
+                progress.host_done(host, fmt_result_line(r), failed=True)
                 return r
         else:
             unreachable_streak = 0
@@ -592,6 +621,7 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
     pending = []                 # list of (host, start_idx)
     done_count = 0
     found_count = 0
+    fail_count = 0
 
     for host in ips:
         rec = state.get(host)
@@ -600,6 +630,8 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
             done_count += 1
             if rec["status"] == "found":
                 found_count += 1
+            elif rec["status"] == "unreachable":
+                fail_count += 1
         else:
             start_idx = 0
             if rec and rec.get("status") == "inprogress":
@@ -656,6 +688,7 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
     progress = Progress(len(ips), len(passwords), workers)
     progress.ips_done = done_count
     progress.found = found_count
+    progress.failed = fail_count
     progress.start_timer()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
@@ -668,7 +701,8 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
             try:
                 results.append(fut.result())
             except Exception as e:  # noqa
-                progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END)
+                progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
+                                   failed=True)
                 results.append({"host": host, "status": "error", "error": str(e)})
 
     progress.finish()
