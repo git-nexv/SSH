@@ -108,48 +108,53 @@ _sudo=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then _sudo="sudo"; fi
 
 show_help() {
-    printf '\033[96m\033[1m'
-    echo "   _ __   _____  ____   __"
-    echo "  | '_ \\ / _ \\ \\/ /\\ \\ / /   nexv - SSH credential finder"
-    echo "  | | | |  __/>  <  \\ V /"
-    echo "  |_| |_|\\___/_/\\_\\  \\_/"
-    printf '\033[0m\n'
-    echo "  Find which password opens which of your SSH servers."
-    echo ""
-    echo "  COMMANDS"
-    echo "  ────────────────────────────────────────────────────────────"
-    echo "    nexv start       Start a new scan. Asks you for:"
-    echo "                       • SSH port (default 22)"
-    echo "                       • username, or a usernames file (default root)"
-    echo "                       • IP list file        (ip.txt)"
-    echo "                       • password list file  (password.txt)"
-    echo "                       • how many servers to check at once (no limit)"
-    echo "                       • how many retries on timeout/reset"
-    echo "                       • whether to re-test already-tested IPs"
-    echo ""
-    echo "    nexv continue    Resume an interrupted scan where it stopped"
-    echo "    nexv retry       Re-try the servers that errored (works mid-scan,"
-    echo "                     from another terminal, without stopping the scan)"
-    echo "    nexv stop        Stop a scan that is currently running"
-    echo "    nexv update      Update to the latest version from GitHub"
-    echo "    nexv uninstall   Remove nexv from this machine"
-    echo "    nexv help        Show this menu"
-    echo ""
-    echo "  FILES (in the folder you run nexv from)"
-    echo "  ────────────────────────────────────────────────────────────"
-    echo "    ip.txt           one IP per line; optional 'IP:PORT' per line"
-    echo "    password.txt     one password per line"
-    echo "    users.txt        (optional) one username per line"
-    echo "    nexv_results_*   saved report after each scan"
-    echo ""
-    echo "  SPEED (environment variables)"
-    echo "  ────────────────────────────────────────────────────────────"
-    echo "    NEXV_TIMEOUT=2   per-attempt timeout seconds (default 3)"
-    echo "    NEXV_PROBE=1     TCP port-probe timeout seconds"
-    echo "    NEXV_DELAY=1     pause between attempts (use if rate-limited)"
-    echo "    example:  NEXV_TIMEOUT=2 nexv start"
-    echo ""
-    echo "  Use only on servers you own or are authorized to test."
+    local C B D R    # cyan, bold, dim, reset
+    if [ -t 1 ]; then C=$'\033[96m'; B=$'\033[1m'; D=$'\033[2m'; R=$'\033[0m';
+    else C=''; B=''; D=''; R=''; fi
+    local line="────────────────────────────────────────────────────────"
+
+    printf '\n'
+    printf '  %s%snexv%s  ·  SSH credential finder\n' "$C" "$B" "$R"
+    printf '  %sFind which password opens which of your SSH servers.%s\n\n' "$D" "$R"
+
+    printf '  %s%sCOMMANDS%s\n' "$C" "$B" "$R"
+    printf '  %s%s%s\n' "$D" "$line" "$R"
+    printf '    %s%-15s%s %s\n' "$B" "nexv start"     "$R" "Start a new scan (asks the questions below)"
+    printf '    %s%-15s%s %s\n' "$B" "nexv continue"  "$R" "Resume an interrupted scan where it stopped"
+    printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan,"
+    printf '    %s%-15s%s %s\n' ""   ""               "$R" "from another terminal, without stopping it)"
+    printf '    %s%-15s%s %s\n' "$B" "nexv stop"      "$R" "Stop a scan that is currently running"
+    printf '    %s%-15s%s %s\n' "$B" "nexv update"    "$R" "Update to the latest version from GitHub"
+    printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
+    printf '    %s%-15s%s %s\n' "$B" "nexv help"      "$R" "Show this menu"
+    printf '\n'
+
+    printf '  %s%sWHAT "nexv start" ASKS%s\n' "$C" "$B" "$R"
+    printf '  %s%s%s\n' "$D" "$line" "$R"
+    printf '    %-22s %s\n' "SSH port(s)"        "one or more, e.g. 22 or 22 2222   (default 22)"
+    printf '    %-22s %s\n' "username / file"    "a name, or a usernames file       (default root)"
+    printf '    %-22s %s\n' "IP list file"       "one IP per line                   (ip.txt)"
+    printf '    %-22s %s\n' "password list file" "one password per line             (password.txt)"
+    printf '    %-22s %s\n' "parallel servers"   "how many to check at once         (no limit)"
+    printf '    %-22s %s\n' "retries"            "attempts on timeout / reset       (default 3)"
+    printf '\n'
+
+    printf '  %s%sFILES%s   %s(in the folder you run nexv from)%s\n' "$C" "$B" "$R" "$D" "$R"
+    printf '  %s%s%s\n' "$D" "$line" "$R"
+    printf '    %s%-16s%s %s\n' "$B" "ip.txt"        "$R" "one IP per line; optional IP:PORT per line"
+    printf '    %s%-16s%s %s\n' "$B" "password.txt"  "$R" "one password per line"
+    printf '    %s%-16s%s %s\n' "$B" "users.txt"     "$R" "(optional) one username per line"
+    printf '    %s%-16s%s %s\n' "$B" "nexv_results_*" "$R" "saved report, written after each scan"
+    printf '\n'
+
+    printf '  %s%sSPEED%s   %s(optional environment variables)%s\n' "$C" "$B" "$R" "$D" "$R"
+    printf '  %s%s%s\n' "$D" "$line" "$R"
+    printf '    %s%-16s%s %s\n' "$B" "NEXV_TIMEOUT"  "$R" "per-attempt timeout in seconds   (default 3)"
+    printf '    %s%-16s%s %s\n' "$B" "NEXV_PROBE"    "$R" "TCP port-probe timeout in seconds"
+    printf '    %s%-16s%s %s\n' "$B" "NEXV_DELAY"    "$R" "pause between attempts (if rate-limited)"
+    printf '    %sexample:%s NEXV_TIMEOUT=2 nexv start\n' "$D" "$R"
+    printf '\n'
+    printf '  %sUse only on servers you own or are authorized to test.%s\n\n' "$D" "$R"
 }
 
 case "${1:-}" in
