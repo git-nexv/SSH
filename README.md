@@ -124,19 +124,29 @@ nexv uninstall   # remove nexv from this machine
 nexv help        # show the full menu
 ```
 
-### Run in background and keep typing
+### Watch live AND type commands at the same time
 
-When you start a scan it asks **"Run in background?"**. Answer `y` and the scan
-detaches — your terminal stays free, so you can type the other commands while it
-runs:
+While a scan runs in the foreground you still see the live display, and there is
+a command line at the bottom:
 
-```bash
-nexv status      # how many done / matched / failed / still scanning
-nexv retry       # re-try the servers that errored
-nexv stop        # stop it (progress is saved; resume with nexv continue)
+```
+[01:23] 94.72.104.95     passwords[4/1000]  → raspberry
+...
+── total 100 · 3 scanning · done 10/100 · 3 matched · 2 failed · 87 queued ──
+> retry▁   (type: retry | status | stop)
 ```
 
-Background output is written to `~/.nexv-ssh/scan.log`.
+Type a command there and press Enter — it does **not** erase your typing:
+
+- `retry`  — re-try the servers that errored (right now, alongside the scan)
+- `status` — print a one-line summary
+- `stop`   — stop the scan (progress is saved; resume with `nexv continue`)
+
+### Or run it in the background
+
+When you start a scan it also asks **"Run in background?"**. Answer `y` and the
+scan detaches so the whole terminal is free; then use `nexv status`, `nexv retry`
+and `nexv stop` as normal commands. Background output goes to `~/.nexv-ssh/scan.log`.
 
 **`nexv retry`** re-tries the servers that failed (connection reset / timeout /
 refused) without disturbing the ones already done. It also works against a scan

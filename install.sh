@@ -128,8 +128,8 @@ show_help() {
     printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
     printf '    %s%-15s%s %s\n' "$B" "nexv help"      "$R" "Show this menu"
     printf '\n'
-    printf '    %sTip: answer "y" to "Run in background?" so your terminal stays%s\n' "$D" "$R"
-    printf '    %sfree to type nexv status / retry / stop while the scan runs.%s\n' "$D" "$R"
+    printf '    %sTip: during a scan you can type %sretry%s%s / %sstatus%s%s / %sstop%s%s right%s\n' "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$R"
+    printf '    %son the live screen and press Enter. Or run it in the background.%s\n' "$D" "$R"
     printf '\n'
 
     printf '  %s%sWHAT "nexv start" ASKS%s\n' "$C" "$B" "$R"

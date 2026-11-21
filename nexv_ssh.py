@@ -14,6 +14,7 @@ import re
 import sys
 import json
 import time
+import atexit
 import shutil
 import signal
 import socket
@@ -54,8 +55,86 @@ def _on_retry_signal(signum, frame):  # noqa
     _RETRY_REQUEST.set()
 
 
+# Stop requested by typing 'stop' in the live input line.
+_QUIT_REQUEST = threading.Event()
+
 # Log file a background scan writes its output to.
 SCAN_LOG = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "scan.log")
+
+
+# ---- raw terminal handling for the live input line -------------------------
+_TTY_FD = None
+_TTY_OLD = None
+
+
+def _enter_cbreak():
+    global _TTY_FD, _TTY_OLD
+    import termios
+    import tty
+    _TTY_FD = sys.stdin.fileno()
+    _TTY_OLD = termios.tcgetattr(_TTY_FD)
+    tty.setcbreak(_TTY_FD)        # keeps Ctrl-C working (ISIG), disables echo
+
+
+def _restore_tty():
+    global _TTY_OLD, _TTY_FD
+    if _TTY_OLD is not None and _TTY_FD is not None:
+        try:
+            import termios
+            termios.tcsetattr(_TTY_FD, termios.TCSADRAIN, _TTY_OLD)
+        except Exception:  # noqa
+            pass
+    _TTY_OLD = None
+
+
+atexit.register(_restore_tty)
+
+
+def _input_reader(progress, handle_cmd, stop_event):
+    """Read a typed command line at the bottom of the live display, so the user
+    can watch the scan AND type commands in the same terminal."""
+    try:
+        import select
+    except Exception:  # noqa
+        return
+    if not sys.stdin.isatty():
+        return
+    try:
+        _enter_cbreak()
+    except Exception:  # noqa
+        return
+    buf = ""
+    progress.set_input("")
+    fd = sys.stdin.fileno()
+    try:
+        while not stop_event.is_set():
+            try:
+                r, _, _ = select.select([fd], [], [], 0.3)
+            except Exception:  # noqa
+                break
+            if not r:
+                continue
+            try:
+                data = os.read(fd, 1)
+            except Exception:  # noqa
+                break
+            if not data:
+                break
+            o = data[0]
+            if o in (10, 13):               # Enter
+                cmd = buf.strip()
+                buf = ""
+                progress.set_input("")
+                handle_cmd(cmd)
+            elif o in (127, 8):             # Backspace
+                buf = buf[:-1]
+                progress.set_input(buf)
+            elif 32 <= o < 127:            # printable
+                buf += chr(o)
+                progress.set_input(buf)
+            # other keys (arrows, etc.) are ignored
+    finally:
+        _restore_tty()
 
 # ---- connection engines ----------------------------------------------------
 # Preferred: the system OpenSSH client + sshpass. It is far more compatible
@@ -157,6 +236,8 @@ class Progress:
         self._ticker = None
         self._stop = False
         self._drawn = 0                      # live rows currently on screen
+        self.input_enabled = False
+        self.input_buffer = ""
         # one visible row per parallel worker, capped for sanity
         self.slots_count = max(1, min(workers, total_ips, MAX_LIVE_ROWS))
         self.slots = [None] * self.slots_count   # slot index -> host
@@ -231,7 +312,24 @@ class Progress:
                 a=self.ips_done, g=C.G, f=self.found, r=C.R, u=self.failed,
                 q=max(0, self.total_ips - self.ips_done - len(self.active)),
                 e=C.END))
+        if self.input_enabled:
+            rows.append(
+                "{b}>{e} {buf}{d}▁   (type: {e}{b}retry{e}{d} | {e}{b}status{e}{d} | {e}{b}stop{e}{d}){e}".format(
+                    b=C.BOLD, e=C.END, d=C.DIM, buf=self.input_buffer))
         return rows
+
+    def status_text(self):
+        return ("total {b}  ·  {k} scanning  ·  done {a}  ·  "
+                "{f} matched  ·  {u} failed  ·  {q} queued").format(
+            b=self.total_ips, k=len(self.active), a=self.ips_done,
+            f=self.found, u=self.failed,
+            q=max(0, self.total_ips - self.ips_done - len(self.active)))
+
+    def set_input(self, buf):
+        with self.lock:
+            self.input_enabled = True
+            self.input_buffer = buf
+            self._repaint_nolock()
 
     def _repaint_nolock(self, permanent=None):
         if not self.active_tty:
@@ -243,9 +341,10 @@ class Progress:
             out.append("\033[{}F".format(self._drawn))   # cursor up to block top
         if permanent is not None:
             out.append("\033[2K" + permanent + "\n")
-        for row in self._build_block():
+        block = self._build_block()
+        for row in block:
             out.append("\033[2K" + row + "\n")
-        self._drawn = self.slots_count + 1
+        self._drawn = len(block)
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -790,10 +889,16 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
         log("")
         log("=== background scan started {} ===".format(datetime.now().isoformat()))
 
+    interactive = (not background) and sys.stdin.isatty() and sys.stdout.isatty()
     if not background:
         log("")
-        log(C.DIM + "Scanning... (from another terminal: 'nexv retry' re-tries failed "
-            "servers, 'nexv stop' stops; progress saved for 'nexv continue')" + C.END)
+        if interactive:
+            log(C.DIM + "Scanning... type a command below and press Enter: "
+                + C.BOLD + "retry" + C.END + C.DIM + " (re-try failed) · "
+                + C.BOLD + "status" + C.END + C.DIM + " · "
+                + C.BOLD + "stop" + C.END + C.DIM + "   (progress is saved)" + C.END)
+        else:
+            log(C.DIM + "Scanning... (progress saved; resume with 'nexv continue')" + C.END)
         log("")
 
     started = datetime.now()
@@ -805,10 +910,36 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
 
     # `nexv retry` / `nexv stop` (from any terminal) reach this scan via signals.
     _RETRY_REQUEST.clear()
+    _QUIT_REQUEST.clear()
     try:
-        signal.signal(signal.SIGUSR1, _on_retry_signal)   # nexv retry
+        signal.signal(signal.SIGUSR1, _on_retry_signal)      # nexv retry
+        signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # nexv stop -> clean exit
     except Exception:  # noqa (not main thread / unsupported)
         pass
+
+    def handle_cmd(cmd):
+        c = cmd.lower().strip()
+        if c.startswith("nexv "):
+            c = c[5:].strip()
+        if c in ("retry", "r"):
+            _RETRY_REQUEST.set()
+        elif c in ("stop", "quit", "q"):
+            _QUIT_REQUEST.set()
+        elif c in ("status", "s"):
+            progress.emit(C.CY + progress.status_text() + C.END)
+        elif c in ("help", "h", "?"):
+            progress.emit(C.DIM + "commands: retry (re-try failed) · status · stop" + C.END)
+        elif c == "":
+            pass
+        else:
+            progress.emit(C.Y + "unknown command: {}  (retry | status | stop)".format(cmd) + C.END)
+
+    _in_stop = threading.Event()
+    _in_thread = None
+    if interactive:
+        _in_thread = threading.Thread(
+            target=_input_reader, args=(progress, handle_cmd, _in_stop), daemon=True)
+        _in_thread.start()
 
     _write_pid()
 
@@ -865,8 +996,13 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
                         progress.emit(C.Y + "↻ Retry: re-trying {} failed server(s)...".format(n) + C.END)
                     else:
                         progress.emit(C.DIM + "↻ Retry: no failed servers to re-try right now." + C.END)
+                # Stop requested (typed 'stop' or `nexv stop`): drain and exit.
+                if _QUIT_REQUEST.is_set() and queue:
+                    progress.emit(C.Y + "■ Stopping... (progress saved; resume with 'nexv continue')" + C.END)
+                    queue.clear()
                 fill()
     finally:
+        _in_stop.set()
         progress.finish()
         _clear_pid()
     elapsed = (datetime.now() - started).total_seconds()
