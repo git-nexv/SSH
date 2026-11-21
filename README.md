@@ -53,7 +53,9 @@ This installs the engine and registers the command `nexv`.
 
 3. It will ask you:
    - **SSH port** (press Enter for `22`, or type another port)
-   - **SSH username** (press Enter for `root`)
+   - **SSH username, or a usernames file** (press Enter for `root`). Type a
+     single username, or the name of a file (e.g. `users.txt`) with one username
+     per line — then every username is tried against every password.
    - **IP list file** (e.g. `ip.txt`)
    - **Password list file** (e.g. `password.txt`)
    - **How many servers to check at the same time** — higher = faster, no cap.
@@ -112,9 +114,10 @@ connection attempts were made, e.g. `(rate-limited? ..., 6 tries)`.
 ```bash
 nexv start       # start a new scan
 nexv continue    # resume an interrupted scan
+nexv stop        # stop a scan that is currently running
 nexv update      # pull the latest version from GitHub
 nexv uninstall   # remove nexv from this machine
-nexv help        # show all commands
+nexv help        # show the full menu
 ```
 
 ## How it works

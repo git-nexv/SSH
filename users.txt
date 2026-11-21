@@ -1,0 +1,6 @@
+# Optional: put one username per line to try several usernames.
+# If you don't use this file, nexv defaults to a single username (root).
+# Example:
+# root
+# admin
+# ubuntu

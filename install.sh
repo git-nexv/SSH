@@ -108,15 +108,46 @@ _sudo=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then _sudo="sudo"; fi
 
 show_help() {
-    echo "nexv - SSH credential finder"
+    printf '\033[96m\033[1m'
+    echo "   _ __   _____  ____   __"
+    echo "  | '_ \\ / _ \\ \\/ /\\ \\ / /   nexv - SSH credential finder"
+    echo "  | | | |  __/>  <  \\ V /"
+    echo "  |_| |_|\\___/_/\\_\\  \\_/"
+    printf '\033[0m\n'
+    echo "  Find which password opens which of your SSH servers."
     echo ""
-    echo "Usage:"
-    echo "  nexv start      Start a new scan (asks: port, username, IP file,"
-    echo "                  password file, and how many servers to check at once)"
-    echo "  nexv continue   Resume an interrupted scan from where it stopped"
-    echo "  nexv update     Update to the latest version from GitHub"
-    echo "  nexv uninstall  Remove nexv from this machine"
-    echo "  nexv help       Show this help"
+    echo "  COMMANDS"
+    echo "  ────────────────────────────────────────────────────────────"
+    echo "    nexv start       Start a new scan. Asks you for:"
+    echo "                       • SSH port (default 22)"
+    echo "                       • username, or a usernames file (default root)"
+    echo "                       • IP list file        (ip.txt)"
+    echo "                       • password list file  (password.txt)"
+    echo "                       • how many servers to check at once (no limit)"
+    echo "                       • how many retries on timeout/reset"
+    echo "                       • whether to re-test already-tested IPs"
+    echo ""
+    echo "    nexv continue    Resume an interrupted scan where it stopped"
+    echo "    nexv stop        Stop a scan that is currently running"
+    echo "    nexv update      Update to the latest version from GitHub"
+    echo "    nexv uninstall   Remove nexv from this machine"
+    echo "    nexv help        Show this menu"
+    echo ""
+    echo "  FILES (in the folder you run nexv from)"
+    echo "  ────────────────────────────────────────────────────────────"
+    echo "    ip.txt           one IP per line; optional 'IP:PORT' per line"
+    echo "    password.txt     one password per line"
+    echo "    users.txt        (optional) one username per line"
+    echo "    nexv_results_*   saved report after each scan"
+    echo ""
+    echo "  SPEED (environment variables)"
+    echo "  ────────────────────────────────────────────────────────────"
+    echo "    NEXV_TIMEOUT=2   per-attempt timeout seconds (default 3)"
+    echo "    NEXV_PROBE=1     TCP port-probe timeout seconds"
+    echo "    NEXV_DELAY=1     pause between attempts (use if rate-limited)"
+    echo "    example:  NEXV_TIMEOUT=2 nexv start"
+    echo ""
+    echo "  Use only on servers you own or are authorized to test."
 }
 
 case "${1:-}" in
@@ -125,6 +156,18 @@ case "${1:-}" in
         ;;
     continue|resume|-c|--continue)
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" continue
+        ;;
+    stop|kill)
+        # Stop the running nexv scan (progress is saved; resume with 'nexv continue').
+        pidf="$NEXV_DIR/nexv.pid"
+        if [ -f "$pidf" ] && kill "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
+            rm -f "$pidf"
+            echo "[*] Stopped the running nexv scan. Resume later with: nexv continue"
+        else
+            rm -f "$pidf" 2>/dev/null
+            echo "[*] No running nexv scan was found."
+        fi
+        exit 0
         ;;
     update|--update|-u)
         echo "[*] Updating nexv ..."
