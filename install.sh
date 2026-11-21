@@ -124,6 +124,13 @@ show_help() {
     printf '    %s%-15s%s %s\n' "$B" "nexv status"    "$R" "Watch the running scan live (full screen)"
     printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan)"
     printf '    %s%-15s%s %s\n' "$B" "nexv stop"      "$R" "Stop a scan that is currently running"
+    printf '\n'
+    printf '    %sResults by category (each offers: re-scan / set aside):%s\n' "$D" "$R"
+    printf '    %s%-15s%s %s\n' "$B" "nexv match"     "$R" "Servers whose password was found"
+    printf '    %s%-15s%s %s\n' "$B" "nexv none"      "$R" "Searched fully, no password matched"
+    printf '    %s%-15s%s %s\n' "$B" "nexv timeout"   "$R" "Could not connect (timeout / reset)"
+    printf '    %s%-15s%s %s\n' "$B" "nexv notdone"   "$R" "Still running / not finished yet"
+    printf '\n'
     printf '    %s%-15s%s %s\n' "$B" "nexv update"    "$R" "Update to the latest version from GitHub"
     printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
     printf '    %s%-15s%s %s\n' "$B" "nexv help"      "$R" "Show this menu"
@@ -173,6 +180,9 @@ case "${1:-}" in
         ;;
     status|--status|-s)
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" status
+        ;;
+    match|matched|none|nomatch|notfound|timeout|timedout|unreachable|failed|notdone|more|pending|running)
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" "$1"
         ;;
     stop|kill)
         # Stop the running nexv scan (progress is saved; resume with 'nexv continue').

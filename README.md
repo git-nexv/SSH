@@ -163,6 +163,32 @@ Full output of each scan is also written to `~/.nexv-ssh/scan.log`.
 refused) without disturbing the ones already done — the retried servers reappear
 among the ones being scanned on the live screen.
 
+## See and act on results by category
+
+```bash
+nexv match      # servers whose password was found
+nexv none       # searched fully, no password matched
+nexv timeout    # could not connect (timeout / reset / refused)
+nexv notdone    # still running or not started yet
+```
+
+For `none`, `timeout` and `notdone` it then asks what to do with that group:
+
+- **start** — re-scan them (unreachable/no-match restart from the first password;
+  in-progress ones continue where they stopped)
+- **stop** — set them aside so future scans ignore them
+- **n** — do nothing
+
+A server that has been **fully tested** (every username × password tried) is kept
+aside automatically and never scanned again.
+
+## Big lists stay stable
+
+The live screen is sized to your terminal (it never draws more rows than fit, and
+long lines are trimmed), so hundreds of servers don't make it flicker. The number
+of servers checked at once defaults to **100** — raising it much higher can
+overload the machine or trip rate-limiting; lower it if the run gets unstable.
+
 ## How it works
 
 - For each server it tries the passwords one by one and **stops at the first

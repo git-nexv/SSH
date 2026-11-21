@@ -209,11 +209,38 @@ def log(msg=""):
         print(msg, flush=True)
 
 
-def _term_width():
+def _term_size():
     try:
-        return max(40, shutil.get_terminal_size((100, 20)).columns)
+        s = shutil.get_terminal_size((100, 24))
+        return max(40, s.columns), max(10, s.lines)
     except Exception:
-        return 100
+        return 100, 24
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _truncate_visible(s, width):
+    """Cut a string so its VISIBLE length (ignoring ANSI color codes) is at most
+    `width`, keeping color codes intact and always resetting at the end. Prevents
+    long rows from wrapping, which would break the cursor-based repaint."""
+    out = []
+    vis = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        m = _ANSI_RE.match(s, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        if vis >= width:
+            break
+        out.append(s[i])
+        vis += 1
+        i += 1
+    out.append("\033[0m")
+    return "".join(out)
 
 
 MAX_LIVE_ROWS = 20   # cap how many per-IP live rows are shown at once
@@ -238,8 +265,11 @@ class Progress:
         self._drawn = 0                      # live rows currently on screen
         self.input_enabled = False
         self.input_buffer = ""
-        # one visible row per parallel worker, capped for sanity
-        self.slots_count = max(1, min(workers, total_ips, MAX_LIVE_ROWS))
+        # Fit the live block to the terminal: never taller than the screen (leave
+        # room for the summary, input line and a few scrolling result lines), and
+        # never wider than the terminal (rows are truncated on render).
+        self.term_w, term_h = _term_size()
+        self.slots_count = max(1, min(workers, total_ips, MAX_LIVE_ROWS, term_h - 6))
         self.slots = [None] * self.slots_count   # slot index -> host
         self.slot_of = {}                        # host -> slot index
         self.active = {}                         # host -> (pw_idx, pw)
@@ -305,11 +335,10 @@ class Progress:
             else:
                 rows.append("{d}[{t}] ...{e}".format(d=C.DIM, t=t, e=C.END))
         rows.append(
-            ("{d}── total {b}  ·  {cy}{k} scanning{d}  ·  "
-             "done {a}/{b}  ·  {g}{f} matched{d}  ·  {r}{u} failed{d}  ·  "
-             "{q} queued ──{e}").format(
-                d=C.DIM, b=self.total_ips, cy=C.CY, k=len(self.active),
-                a=self.ips_done, g=C.G, f=self.found, r=C.R, u=self.failed,
+            ("{d}[{t}] {a}/{b} done · {cy}{k} scan{d} · {g}{f} match{d} · "
+             "{r}{u} fail{d} · {q} left{e}").format(
+                d=C.DIM, t=t, a=self.ips_done, b=self.total_ips, cy=C.CY,
+                k=len(self.active), g=C.G, f=self.found, r=C.R, u=self.failed,
                 q=max(0, self.total_ips - self.ips_done - len(self.active)),
                 e=C.END))
         if self.input_enabled:
@@ -356,11 +385,12 @@ class Progress:
         out = []
         if self._drawn:
             out.append("\033[{}F".format(self._drawn))   # cursor up to block top
+        w = self.term_w - 1
         if permanent is not None:
-            out.append("\033[2K" + permanent + "\n")
+            out.append("\033[2K" + _truncate_visible(permanent, w) + "\n")
         block = self._build_block()
         for row in block:
-            out.append("\033[2K" + row + "\n")
+            out.append("\033[2K" + _truncate_visible(row, w) + "\n")
         self._drawn = len(block)
         sys.stdout.write("".join(out))
         sys.stdout.flush()
@@ -785,11 +815,14 @@ def _rec_to_result(host, rec):
                 "password": rec.get("password", "")}
     if status == "unreachable":
         return {"host": host, "status": "unreachable", "error": rec.get("error", "unknown")}
+    if status == "skipped":
+        return {"host": host, "status": "skipped"}
     return {"host": host, "status": "notfound", "port": rec.get("port")}
 
 
 def do_scan(default_ports, portlists, usernames, ips, passwords, state,
-            resume=False, workers=None, retry_failed=False, ask_background=True):
+            resume=False, workers=None, retry_failed=False, ask_background=True,
+            only_hosts=None):
     """Scan the pending hosts (optionally resuming), return all results.
 
     `portlists` maps each IP to its candidate ports. `usernames` is the list of
@@ -808,8 +841,24 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
     for host in ips:
         rec = state.get(host)
         status = rec.get("status") if rec else None
-        if status == "unreachable" and retry_failed:
+        # With only_hosts set, scan just those; keep every other host's result.
+        if only_hosts is not None and host not in only_hosts:
+            if status in ("found", "notfound", "unreachable", "skipped"):
+                results_by_host[host] = _rec_to_result(host, rec)
+                done_count += 1
+                if status == "found":
+                    found_count += 1
+                elif status == "unreachable":
+                    fail_count += 1
+            continue
+        if status == "skipped":                 # set aside by the user
+            results_by_host[host] = _rec_to_result(host, rec)
+            done_count += 1
+            continue
+        if status == "unreachable" and (retry_failed or only_hosts is not None):
             pending.append((host, 0))        # re-try the failed ones
+        elif only_hosts is not None and status in ("found", "notfound"):
+            pending.append((host, 0))        # user asked to re-scan this set from scratch
         elif status in ("found", "notfound", "unreachable"):
             results_by_host[host] = _rec_to_result(host, rec)
             done_count += 1
@@ -1076,6 +1125,12 @@ def print_results(default_ports, portlists, usernames, ips, results, header=True
         for r in unreachable:
             log("  {:<18} ({})".format(r["host"], r.get("error", "unknown")))
         log("")
+    skipped = [r for r in results if r["status"] == "skipped"]
+    if skipped:
+        log(C.DIM + "SET ASIDE ({}):".format(len(skipped)) + C.END)
+        for r in skipped:
+            log(C.DIM + "  {}".format(r["host"]) + C.END)
+        log("")
     return found, notfound, unreachable, pof
 
 
@@ -1168,13 +1223,17 @@ def run_fresh():
     if pw_dups:
         log(C.DIM + "Skipped {} duplicate password(s) in {}.".format(pw_dups, pw_file) + C.END)
 
-    # How many servers to check at the same time. More = faster (as each server
-    # finishes, the next one starts automatically). No cap: the default is all of
-    # them at once (equal to the number of servers).
-    default_workers = min(MAX_WORKERS, len(ips))
+    # How many servers to check at the same time. More = faster, but too many
+    # opens too many SSH connections at once and can overload the machine or get
+    # you rate-limited. Default is a safe 100 (or fewer if you have fewer IPs).
+    env_w = os.environ.get("NEXV_WORKERS")
+    default_workers = int(env_w) if env_w else min(100, len(ips))
+    default_workers = max(1, min(default_workers, len(ips)))
     workers = ask_int(
-        "How many servers to check at the same time (max {} = all)".format(len(ips)),
+        "How many servers to check at the same time (1-{})".format(len(ips)),
         default_workers, lo=1, hi=len(ips))
+    if workers > 200:
+        log(C.Y + "[!] {} at once is a lot — if it gets unstable, try 50-100.".format(workers) + C.END)
 
     # How many times to retry a server that times out / won't connect before
     # giving up on it.
@@ -1455,6 +1514,64 @@ def run_status():
     run_viewer(default_ports, portlists, usernames, ips, passwords)
 
 
+# Category -> (saved statuses it covers, heading, color)
+_CATEGORIES = {
+    "match":   (("found",),              "MATCHED",          lambda: C.G),
+    "none":    (("notfound",),           "NO PASSWORD FOUND", lambda: C.Y),
+    "timeout": (("unreachable",),        "COULD NOT CONNECT", lambda: C.R),
+    "notdone": ((None, "inprogress"),    "NOT DONE YET",     lambda: C.CY),
+}
+
+
+def run_category(cat):
+    """List the servers in one result category, then (interactively) offer to
+    re-scan them (start) or set them aside (stop)."""
+    state = State()
+    if not state.exists():
+        log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "nexv start" + C.END)
+        return
+    state, default_ports, portlists, usernames, ips, passwords, workers = _load_saved_scan()
+    recs = state.data.get("ips", {})
+    statuses, heading, colf = _CATEGORIES[cat]
+
+    hosts = [ip for ip in ips if (recs.get(ip) or {}).get("status") in statuses]
+    col = colf()
+    log("")
+    log(col + C.BOLD + "{} ({}):".format(heading, len(hosts)) + C.END)
+    if not hosts:
+        log(C.DIM + "  (none)" + C.END)
+        return
+    for ip in hosts:
+        r = recs.get(ip) or {}
+        if cat == "match":
+            log("  {}{:<18}{} {:<6} {:<14} {}{}{}".format(
+                C.CY, ip, C.END, r.get("port") or default_ports[0],
+                r.get("username", "root"), C.G, r.get("password", ""), C.END))
+        elif cat == "timeout":
+            log("  {:<18} ({})".format(ip, r.get("error", "unreachable")))
+        else:
+            log("  {}".format(ip))
+    log("")
+
+    # 'match' is just informational. The others can be re-scanned or set aside.
+    if cat == "match" or not sys.stdin.isatty():
+        return
+    ans = ask("[start] re-scan these · [stop] set them aside · [n] nothing", "n").lower().strip()
+    if ans in ("start", "s", "1", "r", "retry"):
+        only = set(hosts)
+        results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords,
+                                   state, resume=True, workers=workers, only_hosts=only)
+        if results is None:
+            return
+        report(default_ports, portlists, usernames, ips, results, elapsed)
+    elif ans in ("stop", "2", "aside"):
+        for ip in hosts:
+            state.set_done(ip, "skipped")
+        log(C.DIM + "Set aside {} server(s); future scans will ignore them.".format(len(hosts)) + C.END)
+    else:
+        log(C.DIM + "Nothing changed." + C.END)
+
+
 def main():
     banner()
     arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
@@ -1464,6 +1581,14 @@ def main():
         run_retry()
     elif arg in ("status", "--status", "-s"):
         run_status()
+    elif arg in ("match", "matched"):
+        run_category("match")
+    elif arg in ("none", "nomatch", "notfound"):
+        run_category("none")
+    elif arg in ("timeout", "timedout", "unreachable", "failed"):
+        run_category("timeout")
+    elif arg in ("notdone", "more", "pending", "running"):
+        run_category("notdone")
     else:
         run_fresh()
 
