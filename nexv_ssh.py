@@ -53,6 +53,10 @@ _RETRY_REQUEST = threading.Event()
 def _on_retry_signal(signum, frame):  # noqa
     _RETRY_REQUEST.set()
 
+
+# Log file a background scan writes its output to.
+SCAN_LOG = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "scan.log")
+
 # ---- connection engines ----------------------------------------------------
 # Preferred: the system OpenSSH client + sshpass. It is far more compatible
 # with real-world servers (old or hardened crypto) than paramiko.
@@ -669,7 +673,7 @@ def _rec_to_result(host, rec):
 
 
 def do_scan(default_ports, portlists, usernames, ips, passwords, state,
-            resume=False, workers=None, retry_failed=False):
+            resume=False, workers=None, retry_failed=False, ask_background=True):
     """Scan the pending hosts (optionally resuming), return all results.
 
     `portlists` maps each IP to its candidate ports. `usernames` is the list of
@@ -727,7 +731,6 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
     log("  Retries    : {} on reset/timeout{}".format(
         RETRIES, "  ·  delay {}s".format(INTER_DELAY) if INTER_DELAY > 0 else ""))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
-    log("  Tip        : run 'nexv retry' in another terminal to re-try failed servers")
     log("")
 
     # On resume, show everything already found/tested before so the picture is
@@ -749,9 +752,49 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
         log(C.Y + "Cancelled. Progress is saved; run 'nexv continue' to resume." + C.END)
         sys.exit(0)
 
-    log("")
-    log(C.DIM + "Scanning... (progress saved; 'nexv continue' resumes, 'nexv retry' re-tries failures)" + C.END)
-    log("")
+    # Offer to run in the background so the terminal stays free for other
+    # commands (nexv status / retry / stop) while the scan runs.
+    background = False
+    if ask_background and hasattr(os, "fork") and sys.stdout.isatty():
+        ans = ask("Run in background so you can keep typing commands? (y/n)", "n").lower()
+        background = ans in ("y", "yes")
+
+    if background:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        pid = os.fork()
+        if pid > 0:
+            # Parent: tell the user how to drive the background scan, then exit.
+            log("")
+            log(C.G + C.BOLD + "Scan started in the background (pid {}).".format(pid) + C.END)
+            log("  " + C.BOLD + "nexv status" + C.END + "   see progress and matches so far")
+            log("  " + C.BOLD + "nexv retry" + C.END + "    re-try the servers that errored")
+            log("  " + C.BOLD + "nexv stop" + C.END + "     stop it (progress is saved)")
+            log(C.DIM + "  log: {}".format(SCAN_LOG) + C.END)
+            log("")
+            return None, None
+        # Child: detach from the terminal and send output to the log file.
+        try:
+            os.setsid()
+        except Exception:  # noqa
+            pass
+        try:
+            os.makedirs(os.path.dirname(SCAN_LOG), exist_ok=True)
+            _logf = open(SCAN_LOG, "a", buffering=1)
+            os.dup2(_logf.fileno(), sys.stdout.fileno())
+            os.dup2(_logf.fileno(), sys.stderr.fileno())
+            _devnull = open(os.devnull, "r")
+            os.dup2(_devnull.fileno(), sys.stdin.fileno())
+        except Exception:  # noqa
+            pass
+        log("")
+        log("=== background scan started {} ===".format(datetime.now().isoformat()))
+
+    if not background:
+        log("")
+        log(C.DIM + "Scanning... (from another terminal: 'nexv retry' re-tries failed "
+            "servers, 'nexv stop' stops; progress saved for 'nexv continue')" + C.END)
+        log("")
 
     started = datetime.now()
     progress = Progress(len(ips), len(creds), workers)
@@ -760,11 +803,10 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
     progress.failed = fail_count
     progress.start_timer()
 
-    # A SIGUSR1 (sent by `nexv retry`) requests an extra round that re-tries the
-    # servers that errored, without interrupting the current round.
+    # `nexv retry` / `nexv stop` (from any terminal) reach this scan via signals.
     _RETRY_REQUEST.clear()
     try:
-        signal.signal(signal.SIGUSR1, _on_retry_signal)
+        signal.signal(signal.SIGUSR1, _on_retry_signal)   # nexv retry
     except Exception:  # noqa (not main thread / unsupported)
         pass
 
@@ -814,7 +856,8 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
                         progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
                                            failed=True)
                         results_by_host[host] = {"host": host, "status": "error", "error": str(e)}
-                # A retry was requested: re-queue failed servers right away.
+                # A retry was requested ('r' key or `nexv retry`): re-queue the
+                # failed servers right away.
                 if _RETRY_REQUEST.is_set():
                     _RETRY_REQUEST.clear()
                     n = requeue_failed(queue)
@@ -1015,6 +1058,8 @@ def run_fresh():
 
     results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
                               resume=False, workers=workers)
+    if results is None:
+        return                       # detached to background; parent is done
     report(default_ports, portlists, usernames, ips, results, elapsed)
 
 
@@ -1064,6 +1109,8 @@ def run_resume():
     log(C.DIM + "Resuming previous scan..." + C.END)
     results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
                               resume=True, workers=workers)
+    if results is None:
+        return
     report(default_ports, portlists, usernames, ips, results, elapsed)
 
 
@@ -1101,8 +1148,80 @@ def run_retry():
         return
     log(C.DIM + "Re-trying {} failed server(s)...".format(len(failed)) + C.END)
     results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
-                              resume=True, workers=workers, retry_failed=True)
+                              resume=True, workers=workers, retry_failed=True,
+                              ask_background=False)
+    if results is None:
+        return
     report(default_ports, portlists, usernames, ips, results, elapsed)
+
+
+def _scan_running():
+    """Return the running scan's pid, or None."""
+    try:
+        if os.path.isfile(PID_PATH):
+            with open(PID_PATH) as fh:
+                pid = int((fh.read() or "0").strip())
+            if pid:
+                os.kill(pid, 0)   # raises if not alive
+                return pid
+    except Exception:  # noqa
+        pass
+    return None
+
+
+def run_status():
+    """Show a snapshot of the current/last scan from the saved state."""
+    state = State()
+    if not state.exists():
+        log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "nexv start" + C.END)
+        return
+    try:
+        state.load()
+    except Exception as e:  # noqa
+        log(C.R + "[!] Could not read scan state: {}".format(e) + C.END)
+        return
+
+    cfg = state.config()
+    ip_file = cfg.get("ip_file", "ip.txt")
+    default_ports = cfg.get("ports") or [cfg.get("port", 22)]
+    total = None
+    if os.path.isfile(ip_file):
+        ips, _, _ = build_targets(load_lines(ip_file)[0], default_ports)
+        total = len(ips)
+
+    recs = state.data.get("ips", {})
+    found = [h for h, r in recs.items() if r.get("status") == "found"]
+    none_ = [h for h, r in recs.items() if r.get("status") == "notfound"]
+    failed = [h for h, r in recs.items() if r.get("status") == "unreachable"]
+    inprog = [h for h, r in recs.items() if r.get("status") == "inprogress"]
+    done = len(found) + len(none_) + len(failed)
+    if total is None:
+        total = done + len(inprog)
+    queued = max(0, total - done - len(inprog))
+
+    pid = _scan_running()
+    log("")
+    if pid:
+        log(C.G + C.BOLD + "● Scan running (pid {})".format(pid) + C.END)
+    else:
+        log(C.DIM + "○ No scan running (showing last results)" + C.END)
+    log("  total {}  ·  {}scanning {}{}  ·  done {}  ·  {}matched {}{}  ·  {}failed {}{}  ·  queued {}".format(
+        total, C.CY, len(inprog), C.END, done,
+        C.G, len(found), C.END, C.R, len(failed), C.END, queued))
+    log("")
+    if found:
+        log(C.G + C.BOLD + "MATCHED ({}):".format(len(found)) + C.END)
+        order = {}
+        for h in found:
+            r = recs[h]
+            log("  {}{:<18}{} {:<6} {:<14} {}{}{}".format(
+                C.CY, h, C.END, r.get("port") or default_ports[0],
+                r.get("username", "root"), C.G, r.get("password", ""), C.END))
+        log("")
+    if pid:
+        log(C.DIM + "Commands: nexv retry (re-try failed) · nexv stop · nexv status" + C.END)
+    else:
+        log(C.DIM + "Commands: nexv continue (finish) · nexv retry (re-try failed)" + C.END)
 
 
 def main():
@@ -1112,6 +1231,8 @@ def main():
         run_resume()
     elif arg in ("retry", "--retry", "-r"):
         run_retry()
+    elif arg in ("status", "--status", "-s"):
+        run_status()
     else:
         run_fresh()
 

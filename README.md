@@ -115,19 +115,32 @@ connection attempts were made, e.g. `(rate-limited? ..., 6 tries)`.
 
 ```bash
 nexv start       # start a new scan
+nexv status      # show progress + matches of the running/last scan
 nexv continue    # resume an interrupted scan
-nexv retry       # re-try the servers that errored (works mid-scan too)
+nexv retry       # re-try the servers that errored
 nexv stop        # stop a scan that is currently running
 nexv update      # pull the latest version from GitHub
 nexv uninstall   # remove nexv from this machine
 nexv help        # show the full menu
 ```
 
+### Run in background and keep typing
+
+When you start a scan it asks **"Run in background?"**. Answer `y` and the scan
+detaches — your terminal stays free, so you can type the other commands while it
+runs:
+
+```bash
+nexv status      # how many done / matched / failed / still scanning
+nexv retry       # re-try the servers that errored
+nexv stop        # stop it (progress is saved; resume with nexv continue)
+```
+
+Background output is written to `~/.nexv-ssh/scan.log`.
+
 **`nexv retry`** re-tries the servers that failed (connection reset / timeout /
-refused). You can run it *while a scan is still going* from another terminal —
-the scan keeps finding passwords and simply adds an extra round for the failed
-servers. If no scan is running, it re-scans the failed servers from the saved
-results.
+refused) without disturbing the ones already done. It also works against a scan
+still running (foreground in another terminal, or a background scan).
 
 ## How it works
 

@@ -121,12 +121,15 @@ show_help() {
     printf '  %s%s%s\n' "$D" "$line" "$R"
     printf '    %s%-15s%s %s\n' "$B" "nexv start"     "$R" "Start a new scan (asks the questions below)"
     printf '    %s%-15s%s %s\n' "$B" "nexv continue"  "$R" "Resume an interrupted scan where it stopped"
-    printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan,"
-    printf '    %s%-15s%s %s\n' ""   ""               "$R" "from another terminal, without stopping it)"
+    printf '    %s%-15s%s %s\n' "$B" "nexv status"    "$R" "Show progress and matches of the current scan"
+    printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan)"
     printf '    %s%-15s%s %s\n' "$B" "nexv stop"      "$R" "Stop a scan that is currently running"
     printf '    %s%-15s%s %s\n' "$B" "nexv update"    "$R" "Update to the latest version from GitHub"
     printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
     printf '    %s%-15s%s %s\n' "$B" "nexv help"      "$R" "Show this menu"
+    printf '\n'
+    printf '    %sTip: answer "y" to "Run in background?" so your terminal stays%s\n' "$D" "$R"
+    printf '    %sfree to type nexv status / retry / stop while the scan runs.%s\n' "$D" "$R"
     printf '\n'
 
     printf '  %s%sWHAT "nexv start" ASKS%s\n' "$C" "$B" "$R"
@@ -166,6 +169,9 @@ case "${1:-}" in
         ;;
     retry|--retry|-r)
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" retry
+        ;;
+    status|--status|-s)
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" status
         ;;
     stop|kill)
         # Stop the running nexv scan (progress is saved; resume with 'nexv continue').
