@@ -19,7 +19,7 @@ import signal
 import socket
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime
 
 # Where scan progress is saved so an interrupted run can be resumed with
@@ -769,43 +769,60 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
         pass
 
     _write_pid()
+
+    def requeue_failed(queue):
+        """Pull hosts that have errored back into the work queue (triggered by
+        `nexv retry`). Returns how many were re-queued."""
+        failed_hosts = [h for h, r in results_by_host.items()
+                        if r["status"] in ("unreachable", "error")]
+        # Don't re-queue a host that is already queued or in flight.
+        queued = {h for h, _ in queue}
+        failed_hosts = [h for h in failed_hosts if h not in queued]
+        if not failed_hosts:
+            return 0
+        with progress.lock:
+            progress.ips_done = max(0, progress.ips_done - len(failed_hosts))
+            progress.failed = max(0, progress.failed - len(failed_hosts))
+        for h in failed_hosts:
+            results_by_host.pop(h, None)
+            queue.append((h, 0))
+        return len(failed_hosts)
+
     try:
-        round_targets = pending
-        round_no = 0
-        while round_targets:
-            round_no += 1
-            if round_no > 1:
-                log(C.Y + "↻ Retry round {}: re-trying {} failed server(s)...".format(
-                    round_no - 1, len(round_targets)) + C.END)
-            rworkers = max(1, min(requested, len(round_targets)))
-            with ThreadPoolExecutor(max_workers=rworkers) as pool:
-                futures = {
-                    pool.submit(scan_host, host, portlists.get(host, default_ports),
-                                creds, progress, state, sidx, show_user): host
-                    for host, sidx in round_targets
-                }
-                for fut in as_completed(futures):
-                    host = futures[fut]
+        # Dynamic scheduler: keep up to `workers` scans in flight, and whenever
+        # `nexv retry` is received, re-queue the failed servers immediately so
+        # they are retried alongside the ongoing work (not after it).
+        queue = list(pending)
+        in_flight = {}
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            def fill():
+                while queue and len(in_flight) < workers:
+                    host, sidx = queue.pop(0)
+                    fut = pool.submit(scan_host, host, portlists.get(host, default_ports),
+                                      creds, progress, state, sidx, show_user)
+                    in_flight[fut] = host
+
+            fill()
+            while in_flight:
+                done, _ = wait(list(in_flight), timeout=1.0, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    host = in_flight.pop(fut)
                     try:
                         results_by_host[host] = fut.result()
                     except Exception as e:  # noqa
                         progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
                                            failed=True)
                         results_by_host[host] = {"host": host, "status": "error", "error": str(e)}
-
-            # Decide whether another round is needed (retry requested).
-            round_targets = []
-            if _RETRY_REQUEST.is_set():
-                _RETRY_REQUEST.clear()
-                failed_hosts = [h for h, r in results_by_host.items()
-                                if r["status"] in ("unreachable", "error")]
-                if failed_hosts:
-                    # These were counted as done/failed; undo so the retry round
-                    # re-counts them cleanly.
-                    with progress.lock:
-                        progress.ips_done = max(0, progress.ips_done - len(failed_hosts))
-                        progress.failed = max(0, progress.failed - len(failed_hosts))
-                    round_targets = [(h, 0) for h in failed_hosts]
+                # A retry was requested: re-queue failed servers right away.
+                if _RETRY_REQUEST.is_set():
+                    _RETRY_REQUEST.clear()
+                    n = requeue_failed(queue)
+                    if n:
+                        progress.emit(C.Y + "↻ Retry: re-trying {} failed server(s)...".format(n) + C.END)
+                    else:
+                        progress.emit(C.DIM + "↻ Retry: no failed servers to re-try right now." + C.END)
+                fill()
     finally:
         progress.finish()
         _clear_pid()
