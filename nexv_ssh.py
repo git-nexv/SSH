@@ -15,6 +15,7 @@ import sys
 import json
 import time
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -42,6 +43,15 @@ def _clear_pid():
         os.remove(PID_PATH)
     except Exception:
         pass
+
+
+# Set when `nexv retry` sends SIGUSR1 to a running scan: triggers an extra round
+# that re-tries the servers that errored.
+_RETRY_REQUEST = threading.Event()
+
+
+def _on_retry_signal(signum, frame):  # noqa
+    _RETRY_REQUEST.set()
 
 # ---- connection engines ----------------------------------------------------
 # Preferred: the system OpenSSH client + sshpass. It is far more compatible
@@ -397,11 +407,12 @@ def parse_endpoint(token):
     return token, None
 
 
-def build_targets(raw_ips, default_port):
+def build_targets(raw_ips, default_ports):
     """From raw IP lines (each optionally 'ip:port'), build the unique IP list
-    and a per-IP port map. Returns (ips, ports, extra_duplicates)."""
+    and a per-IP list of candidate ports. A line's own ':port' overrides the
+    default list. Returns (ips, portlists, extra_duplicates)."""
     ips = []
-    ports = {}
+    portlists = {}
     seen = set()
     dups = 0
     for tok in raw_ips:
@@ -411,8 +422,8 @@ def build_targets(raw_ips, default_port):
             continue
         seen.add(ip)
         ips.append(ip)
-        ports[ip] = p if p is not None else default_port
-    return ips, ports, dups
+        portlists[ip] = [p] if p is not None else list(default_ports)
+    return ips, portlists, dups
 
 
 def load_usernames(value):
@@ -588,16 +599,24 @@ def fmt_result_line(r):
         C.Y, C.END, C.DIM, host, C.END)
 
 
-def scan_host(host, port, creds, progress, state, start_idx=0, show_user=False):
+def scan_host(host, portlist, creds, progress, state, start_idx=0, show_user=False):
     """Try each (username, password) credential against one host; stop at the
-    first that works. `creds` is a flat list of (username, password) tuples.
+    first that works. `portlist` is the candidate ports to try (the first one
+    that is open is used). `creds` is a flat list of (username, password) tuples.
 
     start_idx lets a resumed run continue from the credential it was on.
     """
-    # Fast pre-check: if the port isn't even open, don't waste any attempts.
-    if not host_is_open(host, port, PROBE_TIMEOUT):
-        r = {"host": host, "status": "unreachable", "error": "port closed / no response (1 try)"}
-        state.set_done(host, "unreachable", error=r["error"])
+    # Find the first open port among the candidates (fast TCP probe).
+    port = None
+    for p in portlist:
+        if host_is_open(host, p, PROBE_TIMEOUT):
+            port = p
+            break
+    if port is None:
+        tried = ",".join(str(p) for p in portlist)
+        err = "port closed / no response (ports {})".format(tried)
+        r = {"host": host, "status": "unreachable", "error": err}
+        state.set_done(host, "unreachable", error=err)
         progress.host_done(host, fmt_result_line(r), failed=True)
         return r
 
@@ -613,8 +632,9 @@ def scan_host(host, port, creds, progress, state, start_idx=0, show_user=False):
         result, attempts = try_password(host, port, user, pw)
         tries += attempts
         if result is True:
-            r = {"host": host, "status": "found", "username": user, "password": pw}
-            state.set_done(host, "found", username=user, password=pw)
+            r = {"host": host, "status": "found", "port": port,
+                 "username": user, "password": pw}
+            state.set_done(host, "found", port=port, username=user, password=pw)
             progress.host_done(host, fmt_result_line(r), found=True)
             return r
         if isinstance(result, str) and result.startswith("ERR:"):
@@ -630,8 +650,8 @@ def scan_host(host, port, creds, progress, state, start_idx=0, show_user=False):
             unreachable_streak = 0
         if INTER_DELAY > 0:
             time.sleep(INTER_DELAY)
-    r = {"host": host, "status": "notfound"}
-    state.set_done(host, "notfound")
+    r = {"host": host, "status": "notfound", "port": port}
+    state.set_done(host, "notfound", port=port)
     progress.host_done(host, fmt_result_line(r))
     return r
 
@@ -640,25 +660,26 @@ def _rec_to_result(host, rec):
     """Convert a saved state record back into a result dict for the report."""
     status = rec.get("status")
     if status == "found":
-        return {"host": host, "status": "found",
+        return {"host": host, "status": "found", "port": rec.get("port"),
                 "username": rec.get("username", "root"),
                 "password": rec.get("password", "")}
     if status == "unreachable":
         return {"host": host, "status": "unreachable", "error": rec.get("error", "unknown")}
-    return {"host": host, "status": "notfound"}
+    return {"host": host, "status": "notfound", "port": rec.get("port")}
 
 
-def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers=None):
+def do_scan(default_ports, portlists, usernames, ips, passwords, state,
+            resume=False, workers=None, retry_failed=False):
     """Scan the pending hosts (optionally resuming), return all results.
 
-    `ports` maps each IP to the port to use for it (per-IP 'ip:port' from the
-    file, else the default `port`). `usernames` is the list of usernames to try;
-    each host is tried against every (username, password) pair.
+    `portlists` maps each IP to its candidate ports. `usernames` is the list of
+    usernames to try; each host is tried against every (username, password) pair.
+    retry_failed also re-scans hosts previously marked unreachable.
     """
     # Flat credential list: every username against every password.
     creds = [(u, p) for u in usernames for p in passwords]
     show_user = len(usernames) > 1
-    results = []
+    results_by_host = {}
     pending = []                 # list of (host, start_idx)
     done_count = 0
     found_count = 0
@@ -666,27 +687,29 @@ def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers
 
     for host in ips:
         rec = state.get(host)
-        if rec and rec.get("status") in ("found", "notfound", "unreachable"):
-            results.append(_rec_to_result(host, rec))
+        status = rec.get("status") if rec else None
+        if status == "unreachable" and retry_failed:
+            pending.append((host, 0))        # re-try the failed ones
+        elif status in ("found", "notfound", "unreachable"):
+            results_by_host[host] = _rec_to_result(host, rec)
             done_count += 1
-            if rec["status"] == "found":
+            if status == "found":
                 found_count += 1
-            elif rec["status"] == "unreachable":
+            elif status == "unreachable":
                 fail_count += 1
         else:
-            start_idx = 0
-            if rec and rec.get("status") == "inprogress":
-                start_idx = int(rec.get("idx", 0))
+            start_idx = int(rec.get("idx", 0)) if status == "inprogress" else 0
             pending.append((host, start_idx))
 
     total = len(ips) * len(creds)
     requested = workers if workers else MAX_WORKERS
     workers = max(1, min(requested, len(pending) or 1))
-    custom_ports = any(ports.get(h, port) != port for h in ips)
+    custom_ports = any(portlists.get(h) != default_ports for h in ips)
+    ports_str = " ".join(str(p) for p in default_ports)
     log("")
     log("{}Summary{}".format(C.BOLD, C.END))
-    log("  Port       : {}{}".format(
-        port, "  (+ per-IP ports from file)" if custom_ports else ""))
+    log("  Port(s)    : {}{}".format(
+        ports_str, "  (+ per-IP ports from file)" if custom_ports else ""))
     if len(usernames) == 1:
         log("  Username   : {}".format(usernames[0]))
     else:
@@ -704,13 +727,14 @@ def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers
     log("  Retries    : {} on reset/timeout{}".format(
         RETRIES, "  ·  delay {}s".format(INTER_DELAY) if INTER_DELAY > 0 else ""))
     log("  Engine     : {}".format("openssh+sshpass" if USE_SSHPASS else "paramiko"))
+    log("  Tip        : run 'nexv retry' in another terminal to re-try failed servers")
     log("")
 
     # On resume, show everything already found/tested before so the picture is
     # complete, not just the servers about to be scanned now.
-    if resume and results:
+    if resume and results_by_host:
         prev_order = {ip: i for i, ip in enumerate(ips)}
-        shown = sorted(results, key=lambda r: prev_order.get(r["host"], 1e9))
+        shown = sorted(results_by_host.values(), key=lambda r: prev_order.get(r["host"], 1e9))
         log(C.BOLD + "Results so far from the previous run ({}):".format(len(shown)) + C.END)
         for r in shown:
             log("  " + fmt_result_line(r))
@@ -718,7 +742,7 @@ def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers
 
     if not pending:
         log(C.G + "Everything is already done — nothing left to scan." + C.END)
-        return results, 0.0
+        return list(results_by_host.values()), 0.0
 
     confirm = ask("Start scanning? (y/n)", "y").lower()
     if confirm not in ("y", "yes"):
@@ -726,7 +750,7 @@ def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers
         sys.exit(0)
 
     log("")
-    log(C.DIM + "Scanning... (progress is saved; you can resume with 'nexv continue')" + C.END)
+    log(C.DIM + "Scanning... (progress saved; 'nexv continue' resumes, 'nexv retry' re-tries failures)" + C.END)
     log("")
 
     started = datetime.now()
@@ -735,32 +759,64 @@ def do_scan(port, ports, usernames, ips, passwords, state, resume=False, workers
     progress.found = found_count
     progress.failed = fail_count
     progress.start_timer()
+
+    # A SIGUSR1 (sent by `nexv retry`) requests an extra round that re-tries the
+    # servers that errored, without interrupting the current round.
+    _RETRY_REQUEST.clear()
+    try:
+        signal.signal(signal.SIGUSR1, _on_retry_signal)
+    except Exception:  # noqa (not main thread / unsupported)
+        pass
+
     _write_pid()
     try:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(scan_host, host, ports.get(host, port), creds,
-                            progress, state, sidx, show_user): host
-                for host, sidx in pending
-            }
-            for fut in as_completed(futures):
-                host = futures[fut]
-                try:
-                    results.append(fut.result())
-                except Exception as e:  # noqa
-                    progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
-                                       failed=True)
-                    results.append({"host": host, "status": "error", "error": str(e)})
+        round_targets = pending
+        round_no = 0
+        while round_targets:
+            round_no += 1
+            if round_no > 1:
+                log(C.Y + "↻ Retry round {}: re-trying {} failed server(s)...".format(
+                    round_no - 1, len(round_targets)) + C.END)
+            rworkers = max(1, min(requested, len(round_targets)))
+            with ThreadPoolExecutor(max_workers=rworkers) as pool:
+                futures = {
+                    pool.submit(scan_host, host, portlists.get(host, default_ports),
+                                creds, progress, state, sidx, show_user): host
+                    for host, sidx in round_targets
+                }
+                for fut in as_completed(futures):
+                    host = futures[fut]
+                    try:
+                        results_by_host[host] = fut.result()
+                    except Exception as e:  # noqa
+                        progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
+                                           failed=True)
+                        results_by_host[host] = {"host": host, "status": "error", "error": str(e)}
+
+            # Decide whether another round is needed (retry requested).
+            round_targets = []
+            if _RETRY_REQUEST.is_set():
+                _RETRY_REQUEST.clear()
+                failed_hosts = [h for h, r in results_by_host.items()
+                                if r["status"] in ("unreachable", "error")]
+                if failed_hosts:
+                    # These were counted as done/failed; undo so the retry round
+                    # re-counts them cleanly.
+                    with progress.lock:
+                        progress.ips_done = max(0, progress.ips_done - len(failed_hosts))
+                        progress.failed = max(0, progress.failed - len(failed_hosts))
+                    round_targets = [(h, 0) for h in failed_hosts]
     finally:
         progress.finish()
         _clear_pid()
     elapsed = (datetime.now() - started).total_seconds()
-    return results, elapsed
+    return list(results_by_host.values()), elapsed
 
 
-def report(port, ports, usernames, ips, results, elapsed):
-    def pof(host):
-        return ports.get(host, port)
+def report(default_ports, portlists, usernames, ips, results, elapsed):
+    def pof(r):
+        # Actual matched port if known, else the host's first candidate port.
+        return r.get("port") or (portlists.get(r["host"]) or default_ports)[0]
 
     # Keep the report in the same order as the input IP file
     order = {ip: i for i, ip in enumerate(ips)}
@@ -784,7 +840,7 @@ def report(port, ports, usernames, ips, results, elapsed):
         log("  {:<18} {:<6} {:<14} {}".format("-" * 16, "-" * 4, "-" * 12, "-" * 20))
         for r in found:
             log("  {}{:<18}{} {:<6} {:<14} {}{}{}".format(
-                C.CY, r["host"], C.END, pof(r["host"]),
+                C.CY, r["host"], C.END, pof(r),
                 r.get("username", "root"), C.G, r["password"], C.END))
         log("")
 
@@ -809,11 +865,12 @@ def report(port, ports, usernames, ips, results, elapsed):
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write("nexv-ssh results  -  {}\n".format(now.isoformat()))
-            fh.write("port={}  usernames={}\n\n".format(port, ",".join(usernames)))
+            fh.write("ports={}  usernames={}\n\n".format(
+                " ".join(str(p) for p in default_ports), ",".join(usernames)))
             fh.write("# MATCHED (ip | port | username | password)\n")
             for r in found:
                 fh.write("{} | {} | {} | {}\n".format(
-                    r["host"], pof(r["host"]), r.get("username", "root"), r["password"]))
+                    r["host"], pof(r), r.get("username", "root"), r["password"]))
             fh.write("\n# NO MATCH\n")
             for r in notfound:
                 fh.write("{}\n".format(r["host"]))
@@ -825,16 +882,23 @@ def report(port, ports, usernames, ips, results, elapsed):
         log(C.R + "[!] Could not save results file: {}".format(e) + C.END)
 
 
-def ask_port(default="22"):
-    port_raw = ask("SSH port to test", default)
-    try:
-        port = int(port_raw)
-        if not (1 <= port <= 65535):
-            raise ValueError
-    except ValueError:
-        log(C.R + "[!] Invalid port: {}".format(port_raw) + C.END)
+def ask_ports(default="22"):
+    """Ask for one or more ports, space- (or comma-) separated, e.g. '22 35 65'.
+    Returns a list of ints."""
+    raw = ask("SSH port(s) to test, space-separated (e.g. 22 2222)", default)
+    ports = []
+    for tok in raw.replace(",", " ").split():
+        try:
+            p = int(tok)
+        except ValueError:
+            log(C.Y + "[!] Ignoring invalid port '{}'".format(tok) + C.END)
+            continue
+        if 1 <= p <= 65535 and p not in ports:
+            ports.append(p)
+    if not ports:
+        log(C.R + "[!] No valid port given." + C.END)
         sys.exit(1)
-    return port
+    return ports
 
 
 def ask_int(prompt, default, lo=1, hi=None):
@@ -853,7 +917,7 @@ def ask_int(prompt, default, lo=1, hi=None):
 
 def run_fresh():
     """Start a brand-new scan (asks for everything), saving progress as it goes."""
-    port = ask_port()
+    default_ports = ask_ports()
     user_in = ask("SSH username, or a usernames file", "root")
     usernames = load_usernames(user_in)
     if len(usernames) > 1:
@@ -863,8 +927,8 @@ def run_fresh():
 
     raw_ips, ip_dups = load_lines(ip_file)
     passwords, pw_dups = load_lines(pw_file)
-    # Parse optional 'ip:port' suffixes; each IP keeps its own port.
-    ips, ports, extra = build_targets(raw_ips, port)
+    # Parse optional 'ip:port' suffixes; each IP keeps its own port list.
+    ips, portlists, extra = build_targets(raw_ips, default_ports)
     ip_dups += extra
     if not ips:
         log(C.R + "[!] No IPs found in {}".format(ip_file) + C.END)
@@ -914,7 +978,7 @@ def run_fresh():
 
     state = State()
     state.init_fresh({
-        "port": port,
+        "ports": default_ports,
         "usernames": usernames,
         "ip_file": os.path.abspath(ip_file),
         "pw_file": os.path.abspath(pw_file),
@@ -926,18 +990,21 @@ def run_fresh():
     for ip in skip:
         rec = history[ip]
         if rec.get("status") == "found":
-            state.set_done(ip, "found", username=rec.get("username", "root"),
+            state.set_done(ip, "found", port=rec.get("port"),
+                           username=rec.get("username", "root"),
                            password=rec.get("password", ""))
         else:
-            state.set_done(ip, "notfound")
+            state.set_done(ip, "notfound", port=rec.get("port"))
 
-    results, elapsed = do_scan(port, ports, usernames, ips, passwords, state,
+    results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
                               resume=False, workers=workers)
-    report(port, ports, usernames, ips, results, elapsed)
+    report(default_ports, portlists, usernames, ips, results, elapsed)
 
 
-def run_resume():
-    """Resume an interrupted scan from the saved progress file."""
+def _load_saved_scan():
+    """Load the saved state + config and rebuild the scan inputs. Used by both
+    `continue` and `retry`. Returns (state, default_ports, portlists, usernames,
+    ips, passwords, workers)."""
     state = State()
     if not state.exists():
         log(C.Y + "[!] No saved progress found." + C.END)
@@ -950,7 +1017,7 @@ def run_resume():
         sys.exit(1)
 
     cfg = state.config()
-    port = cfg.get("port", 22)
+    default_ports = cfg.get("ports") or [cfg.get("port", 22)]
     usernames = cfg.get("usernames") or [cfg.get("username", "root")]
     ip_file = cfg.get("ip_file", "ip.txt")
     pw_file = cfg.get("pw_file", "password.txt")
@@ -958,10 +1025,6 @@ def run_resume():
     global RETRIES
     if cfg.get("retries") is not None:
         RETRIES = int(cfg.get("retries"))
-
-    log(C.DIM + "Resuming previous scan:" + C.END)
-    log("  IP file       : {}".format(ip_file))
-    log("  Password file : {}".format(pw_file))
 
     for label, path in (("IP", ip_file), ("Password", pw_file)):
         if not os.path.isfile(path):
@@ -971,14 +1034,58 @@ def run_resume():
 
     raw_ips, _ = load_lines(ip_file)
     passwords, _ = load_lines(pw_file)
-    ips, ports, _ = build_targets(raw_ips, port)
+    ips, portlists, _ = build_targets(raw_ips, default_ports)
     if not ips or not passwords:
         log(C.R + "[!] IP or password file is now empty." + C.END)
         sys.exit(1)
+    return state, default_ports, portlists, usernames, ips, passwords, workers
 
-    results, elapsed = do_scan(port, ports, usernames, ips, passwords, state,
+
+def run_resume():
+    """Resume an interrupted scan from the saved progress file."""
+    state, default_ports, portlists, usernames, ips, passwords, workers = _load_saved_scan()
+    log(C.DIM + "Resuming previous scan..." + C.END)
+    results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
                               resume=True, workers=workers)
-    report(port, ports, usernames, ips, results, elapsed)
+    report(default_ports, portlists, usernames, ips, results, elapsed)
+
+
+def run_retry():
+    """Re-try the servers that errored.
+
+    If a scan is currently running, ask it (via signal) to add a retry round for
+    its failed servers, without stopping its work. Otherwise, run a standalone
+    retry of the failed servers from the saved progress.
+    """
+    # Is a scan already running? Ask it to retry its failures.
+    pid = None
+    try:
+        if os.path.isfile(PID_PATH):
+            with open(PID_PATH) as fh:
+                pid = int((fh.read() or "0").strip())
+    except Exception:  # noqa
+        pid = None
+    if pid and pid != os.getpid():
+        try:
+            os.kill(pid, signal.SIGUSR1)
+            log(C.G + "Asked the running scan (pid {}) to re-try its failed servers.".format(pid) + C.END)
+            log(C.DIM + "The running scan keeps going; failed servers get an extra round." + C.END)
+            return
+        except ProcessLookupError:
+            pass            # stale pid file; fall through to standalone retry
+        except Exception as e:  # noqa
+            log(C.Y + "[!] Could not signal the running scan: {}".format(e) + C.END)
+
+    # No scan running: standalone retry of the failed servers.
+    state, default_ports, portlists, usernames, ips, passwords, workers = _load_saved_scan()
+    failed = [h for h in ips if (state.get(h) or {}).get("status") in ("unreachable",)]
+    if not failed:
+        log(C.G + "No failed servers to re-try." + C.END)
+        return
+    log(C.DIM + "Re-trying {} failed server(s)...".format(len(failed)) + C.END)
+    results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
+                              resume=True, workers=workers, retry_failed=True)
+    report(default_ports, portlists, usernames, ips, results, elapsed)
 
 
 def main():
@@ -986,6 +1093,8 @@ def main():
     arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
     if arg in ("continue", "--continue", "-c", "resume", "--resume"):
         run_resume()
+    elif arg in ("retry", "--retry", "-r"):
+        run_retry()
     else:
         run_fresh()
 

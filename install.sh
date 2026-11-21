@@ -128,6 +128,8 @@ show_help() {
     echo "                       • whether to re-test already-tested IPs"
     echo ""
     echo "    nexv continue    Resume an interrupted scan where it stopped"
+    echo "    nexv retry       Re-try the servers that errored (works mid-scan,"
+    echo "                     from another terminal, without stopping the scan)"
     echo "    nexv stop        Stop a scan that is currently running"
     echo "    nexv update      Update to the latest version from GitHub"
     echo "    nexv uninstall   Remove nexv from this machine"
@@ -156,6 +158,9 @@ case "${1:-}" in
         ;;
     continue|resume|-c|--continue)
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" continue
+        ;;
+    retry|--retry|-r)
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" retry
         ;;
     stop|kill)
         # Stop the running nexv scan (progress is saved; resume with 'nexv continue').
