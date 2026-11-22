@@ -243,7 +243,7 @@ def _truncate_visible(s, width):
     return "".join(out)
 
 
-MAX_LIVE_ROWS = 20   # cap how many per-IP live rows are shown at once
+MAX_LIVE_ROWS = 300  # upper safety cap; the terminal height is the real limit
 
 
 class Progress:
@@ -334,12 +334,19 @@ class Progress:
                         b=C.BOLD, i=idx, n=self.total_pw, y=C.Y, pw=pw))
             else:
                 rows.append("{d}[{t}] ...{e}".format(d=C.DIM, t=t, e=C.END))
+        scanning = len(self.active)
+        shown = sum(1 for s in self.slots if s is not None)
+        more = ""
+        if scanning > shown:
+            more = "{} (+{} not shown)".format(shown, scanning - shown)
+        else:
+            more = "{}".format(scanning)
         rows.append(
-            ("{d}[{t}] {a}/{b} done · {cy}{k} scan{d} · {g}{f} match{d} · "
+            ("{d}[{t}] {a}/{b} done · {cy}{m} scan{d} · {g}{f} match{d} · "
              "{r}{u} fail{d} · {q} left{e}").format(
                 d=C.DIM, t=t, a=self.ips_done, b=self.total_ips, cy=C.CY,
-                k=len(self.active), g=C.G, f=self.found, r=C.R, u=self.failed,
-                q=max(0, self.total_ips - self.ips_done - len(self.active)),
+                m=more, g=C.G, f=self.found, r=C.R, u=self.failed,
+                q=max(0, self.total_ips - self.ips_done - scanning),
                 e=C.END))
         if self.input_enabled:
             rows.append(
@@ -368,11 +375,12 @@ class Progress:
             self.ips_done = ips_done
             self.found = found
             self.failed = failed
-            self.active = {}
+            # Keep the FULL active set (so the summary count is correct), but
+            # only give the first slots_count of them a visible row.
+            self.active = {host: (idx1, pw) for host, idx1, pw in active_list}
             self.slots = [None] * self.slots_count
             self.slot_of = {}
             for i, (host, idx1, pw) in enumerate(active_list[:self.slots_count]):
-                self.active[host] = (idx1, pw)
                 self.slots[i] = host
                 self.slot_of[host] = i
             self._repaint_nolock()
@@ -1434,11 +1442,11 @@ def run_retry():
         return
     log(C.DIM + "Re-trying {} failed server(s)...".format(len(failed)) + C.END)
     results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
-                              resume=True, workers=workers, retry_failed=True,
-                              ask_background=False)
+                              resume=True, workers=workers, retry_failed=True)
     if results is None:
-        return
+        return                       # detached to background; survives terminal close
     report(default_ports, portlists, usernames, ips, results, elapsed)
+    prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
 
 
 def _scan_running():
@@ -1624,6 +1632,7 @@ def run_category(cat):
         if results is None:
             return
         report(default_ports, portlists, usernames, ips, results, elapsed)
+        prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
     elif ans in ("stop", "2", "aside"):
         for ip in hosts:
             state.set_done(ip, "skipped")
