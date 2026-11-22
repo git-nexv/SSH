@@ -146,8 +146,12 @@ show_help() {
     printf '    %-22s %s\n' "username / file"    "a name, or a usernames file       (default root)"
     printf '    %-22s %s\n' "IP list file"       "one IP per line                   (ip.txt)"
     printf '    %-22s %s\n' "password list file" "one password per line             (password.txt)"
-    printf '    %-22s %s\n' "parallel servers"   "how many to check at once         (no limit)"
+    printf '    %-22s %s\n' "how many IPs"       "scan only the first N this run    (default all)"
+    printf '    %-22s %s\n' "how many at once"   "parallel servers                  (default 100)"
     printf '    %-22s %s\n' "retries"            "attempts on timeout / reset       (default 3)"
+    printf '\n'
+    printf '    %sFinished IPs (found / no-match) are removed from ip.txt, so you%s\n' "$D" "$R"
+    printf '    %scan work through a big list in batches.%s\n' "$D" "$R"
     printf '\n'
 
     printf '  %s%sFILES%s   %s(in the folder you run nexv from)%s\n' "$C" "$B" "$R" "$D" "$R"

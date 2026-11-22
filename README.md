@@ -60,9 +60,10 @@ This installs the engine and registers the command `nexv`.
      per line — then every username is tried against every password.
    - **IP list file** (e.g. `ip.txt`)
    - **Password list file** (e.g. `password.txt`)
-   - **How many servers to check at the same time** — higher = faster, no cap.
-     The default is *all* of them at once (even hundreds); as each server
-     finishes, the next one starts. Lower it only if you hit rate-limiting.
+   - **How many IPs to scan this run** — scan only the first *N* from the file
+     (Enter = all). Lets you work through a big list in batches.
+   - **How many to check at the same time** — parallelism (default 100). Higher
+     is faster but too many at once can overload the machine / rate-limit you.
    - **How many retries when a server times out / won't connect** (default `3`)
      — a server that resets or times out is retried this many times (with
      backoff) before being marked unreachable.
@@ -180,7 +181,9 @@ For `none`, `timeout` and `notdone` it then asks what to do with that group:
 - **n** — do nothing
 
 A server that has been **fully tested** (every username × password tried) is kept
-aside automatically and never scanned again.
+aside automatically and never scanned again. Finished IPs (found / no-match) are
+also **removed from `ip.txt`** after the scan, so the file shrinks to the servers
+that still need work (unreachable and untouched IPs stay).
 
 ## Big lists stay stable
 

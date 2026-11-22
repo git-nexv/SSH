@@ -1210,9 +1210,9 @@ def run_fresh():
     raw_ips, ip_dups = load_lines(ip_file)
     passwords, pw_dups = load_lines(pw_file)
     # Parse optional 'ip:port' suffixes; each IP keeps its own port list.
-    ips, portlists, extra = build_targets(raw_ips, default_ports)
+    all_ips, all_portlists, extra = build_targets(raw_ips, default_ports)
     ip_dups += extra
-    if not ips:
+    if not all_ips:
         log(C.R + "[!] No IPs found in {}".format(ip_file) + C.END)
         sys.exit(1)
     if not passwords:
@@ -1223,14 +1223,24 @@ def run_fresh():
     if pw_dups:
         log(C.DIM + "Skipped {} duplicate password(s) in {}.".format(pw_dups, pw_file) + C.END)
 
-    # How many servers to check at the same time. More = faster, but too many
-    # opens too many SSH connections at once and can overload the machine or get
-    # you rate-limited. Default is a safe 100 (or fewer if you have fewer IPs).
+    # How MANY IPs from the file to scan this run (take the first N). This lets
+    # you work through a big list in batches; the rest stay untouched.
+    total_ips = len(all_ips)
+    batch = ask_int(
+        "How many IPs to scan this run (1-{}, Enter = all)".format(total_ips),
+        total_ips, lo=1, hi=total_ips)
+    ips = all_ips[:batch]
+    portlists = {ip: all_portlists[ip] for ip in ips}
+    if batch < total_ips:
+        log(C.DIM + "Scanning the first {} of {} IPs this run.".format(batch, total_ips) + C.END)
+
+    # How many of those to check AT THE SAME TIME (parallelism). More = faster,
+    # but too many open SSH connections can overload the machine / rate-limit you.
     env_w = os.environ.get("NEXV_WORKERS")
     default_workers = int(env_w) if env_w else min(100, len(ips))
     default_workers = max(1, min(default_workers, len(ips)))
     workers = ask_int(
-        "How many servers to check at the same time (1-{})".format(len(ips)),
+        "How many of those to check at the same time (1-{})".format(len(ips)),
         default_workers, lo=1, hi=len(ips))
     if workers > 200:
         log(C.Y + "[!] {} at once is a lot — if it gets unstable, try 50-100.".format(workers) + C.END)
@@ -1270,6 +1280,10 @@ def run_fresh():
         "pw_file": os.path.abspath(pw_file),
         "workers": workers,
         "retries": RETRIES,
+        # The exact batch scanned this run, so continue/status/retry use the same
+        # set even if ip.txt changes (we also prune finished IPs from the file).
+        "scan_ips": ips,
+        "portmap": {ip: portlists[ip] for ip in ips},
     })
     # Carry forward results for the IPs we're skipping, so they appear in the
     # report and are not scanned again.
@@ -1287,6 +1301,7 @@ def run_fresh():
     if results is None:
         return                       # detached to background; parent is done
     report(default_ports, portlists, usernames, ips, results, elapsed)
+    prune_ipfile(os.path.abspath(ip_file), state)
 
 
 def _load_saved_scan():
@@ -1314,19 +1329,63 @@ def _load_saved_scan():
     if cfg.get("retries") is not None:
         RETRIES = int(cfg.get("retries"))
 
-    for label, path in (("IP", ip_file), ("Password", pw_file)):
-        if not os.path.isfile(path):
-            log(C.R + "[!] {} file no longer exists: {}".format(label, path) + C.END)
+    if not os.path.isfile(pw_file):
+        log(C.R + "[!] Password file no longer exists: {}".format(pw_file) + C.END)
+        log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv start" + C.END)
+        sys.exit(1)
+    passwords, _ = load_lines(pw_file)
+
+    # Prefer the exact batch this scan was started with (so pruning ip.txt or
+    # editing it doesn't change which servers this scan covers).
+    scan_ips = cfg.get("scan_ips")
+    portmap = cfg.get("portmap")
+    if scan_ips:
+        ips = list(scan_ips)
+        portlists = {ip: (portmap or {}).get(ip, list(default_ports)) for ip in ips}
+    else:
+        if not os.path.isfile(ip_file):
+            log(C.R + "[!] IP file no longer exists: {}".format(ip_file) + C.END)
             log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv start" + C.END)
             sys.exit(1)
-
-    raw_ips, _ = load_lines(ip_file)
-    passwords, _ = load_lines(pw_file)
-    ips, portlists, _ = build_targets(raw_ips, default_ports)
+        raw_ips, _ = load_lines(ip_file)
+        ips, portlists, _ = build_targets(raw_ips, default_ports)
     if not ips or not passwords:
-        log(C.R + "[!] IP or password file is now empty." + C.END)
+        log(C.R + "[!] IP or password list is now empty." + C.END)
         sys.exit(1)
     return state, default_ports, portlists, usernames, ips, passwords, workers
+
+
+def prune_ipfile(ip_file, state):
+    """Remove fully-checked IPs (found / no-match) from the IP file, so the file
+    shrinks to the servers that still need work. Unreachable and untouched IPs
+    are kept."""
+    try:
+        recs = state.data.get("ips", {})
+        done = {ip for ip, r in recs.items() if r.get("status") in ("found", "notfound")}
+        if not done or not os.path.isfile(ip_file):
+            return
+        with open(ip_file, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+        kept = []
+        removed = 0
+        for line in lines:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                kept.append(line)
+                continue
+            ip, _ = parse_endpoint(s)
+            if ip in done:
+                removed += 1
+                continue
+            kept.append(line)
+        if removed:
+            tmp = ip_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.writelines(kept)
+            os.replace(tmp, ip_file)
+            log(C.DIM + "Removed {} finished IP(s) from {}.".format(removed, ip_file) + C.END)
+    except Exception:  # noqa
+        pass
 
 
 def run_resume():
@@ -1338,6 +1397,7 @@ def run_resume():
     if results is None:
         return
     report(default_ports, portlists, usernames, ips, results, elapsed)
+    prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
 
 
 def run_retry():
