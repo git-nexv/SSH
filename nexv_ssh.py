@@ -1535,10 +1535,31 @@ def run_viewer(default_ports, portlists, usernames, ips, passwords):
     reader = threading.Thread(target=_input_reader, args=(progress, handle_cmd, stop_ev), daemon=True)
     reader.start()
 
+    TERMINAL = ("found", "notfound", "unreachable", "skipped")
+
+    # First, print EVERY result we already have (matched / none / failed / aside)
+    # — the full list, no limit — then stream each new one as it finishes.
+    announced = set()
+    recs0 = read_recs()
+    init = _results_from_state(recs0, ips) + [
+        {"host": ip, "status": "skipped"} for ip in ips
+        if (recs0.get(ip) or {}).get("status") == "skipped"]
+    if init:
+        print_results(default_ports, portlists, usernames, ips, init, header=False)
+    for ip in ips:
+        if (recs0.get(ip) or {}).get("status") in TERMINAL:
+            announced.add(ip)
+
     viewer_start = time.time()
     try:
         while not quit_flag.is_set():
             recs = read_recs()
+            # Stream every newly-finished server (so all of them are shown, no cap).
+            for ip in ips:
+                st = (recs.get(ip) or {}).get("status")
+                if st in TERMINAL and ip not in announced:
+                    announced.add(ip)
+                    progress.emit(fmt_result_line(_rec_to_result(ip, recs[ip])))
             active = []
             for ip in ips:
                 r = recs.get(ip)
@@ -1565,9 +1586,22 @@ def run_viewer(default_ports, portlists, usernames, ips, passwords):
         progress.finish()
 
     recs = read_recs()
-    print_results(default_ports, portlists, usernames, ips, _results_from_state(recs, ips))
+    results = _results_from_state(recs, ips)
+    found = [r for r in results if r["status"] == "found"]
+    notfound = [r for r in results if r["status"] == "notfound"]
+    unreachable = [r for r in results if r["status"] == "unreachable"]
+    log("")
+    log(C.DIM + "{} matched · {} no-match · {} failed · {} total".format(
+        len(found), len(notfound), len(unreachable), len(ips)) + C.END)
+    if found:
+        log(C.G + C.BOLD + "MATCHED ({}):".format(len(found)) + C.END)
+        for r in found:
+            log("  {}{:<18}{} {:<6} {:<14} {}{}{}".format(
+                C.CY, r["host"], C.END, r.get("port") or default_ports[0],
+                r.get("username", "root"), C.G, r.get("password", ""), C.END))
     if _scan_running():
-        log(C.DIM + "Scan still running — 'nexv status' to keep watching." + C.END)
+        log(C.DIM + "Scan still running — 'nexv status' to keep watching, "
+            "'nexv timeout' / 'nexv notdone' for full lists." + C.END)
     elif quit_flag.is_set():
         log(C.DIM + "Stopped watching. The scan continues if it was running." + C.END)
 
