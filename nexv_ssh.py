@@ -1625,9 +1625,9 @@ _CATEGORIES = {
 }
 
 
-def run_category(cat):
-    """List the servers in one result category, then (interactively) offer to
-    re-scan them (start) or set them aside (stop)."""
+def run_category(cat, action=None):
+    """List the servers in one result category. With action 're-scan them
+    (start) or set them aside (stop); without an action, just list."""
     state = State()
     if not state.exists():
         log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "nexv start" + C.END)
@@ -1655,11 +1655,21 @@ def run_category(cat):
             log("  {}".format(ip))
     log("")
 
-    # 'match' is just informational. The others can be re-scanned or set aside.
-    if cat == "match" or not sys.stdin.isatty():
+    action = (action or "").lower().strip()
+
+    # No action given: just list, and (for actionable groups) show how to act.
+    if not action:
+        if cat != "match":
+            log(C.DIM + "To act on these: {}nexv {} start{}{} (re-scan) · "
+                "{}nexv {} stop{}{} (set aside)".format(
+                    C.BOLD, cat, C.END, C.DIM, C.BOLD, cat, C.END, C.DIM) + C.END)
         return
-    ans = ask("[start] re-scan these · [stop] set them aside · [n] nothing", "n").lower().strip()
-    if ans in ("start", "s", "1", "r", "retry"):
+
+    if cat == "match":
+        log(C.DIM + "Nothing to do for matched servers." + C.END)
+        return
+
+    if action in ("start", "rescan", "re-scan", "retry"):
         only = set(hosts)
         results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords,
                                    state, resume=True, workers=workers, only_hosts=only)
@@ -1667,17 +1677,18 @@ def run_category(cat):
             return
         report(default_ports, portlists, usernames, ips, results, elapsed)
         prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
-    elif ans in ("stop", "2", "aside"):
+    elif action in ("stop", "aside", "skip"):
         for ip in hosts:
             state.set_done(ip, "skipped")
         log(C.DIM + "Set aside {} server(s); future scans will ignore them.".format(len(hosts)) + C.END)
     else:
-        log(C.DIM + "Nothing changed." + C.END)
+        log(C.Y + "Unknown action '{}'. Use: start  or  stop".format(action) + C.END)
 
 
 def main():
     banner()
     arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+    arg2 = sys.argv[2].lower() if len(sys.argv) > 2 else None
     if arg in ("continue", "--continue", "-c", "resume", "--resume"):
         run_resume()
     elif arg in ("retry", "--retry", "-r"):
@@ -1685,13 +1696,13 @@ def main():
     elif arg in ("status", "--status", "-s"):
         run_status()
     elif arg in ("match", "matched"):
-        run_category("match")
+        run_category("match", arg2)
     elif arg in ("none", "nomatch", "notfound"):
-        run_category("none")
+        run_category("none", arg2)
     elif arg in ("timeout", "timedout", "unreachable", "failed"):
-        run_category("timeout")
+        run_category("timeout", arg2)
     elif arg in ("notdone", "more", "pending", "running"):
-        run_category("notdone")
+        run_category("notdone", arg2)
     else:
         run_fresh()
 

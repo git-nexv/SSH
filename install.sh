@@ -125,11 +125,12 @@ show_help() {
     printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan)"
     printf '    %s%-15s%s %s\n' "$B" "nexv stop"      "$R" "Stop a scan that is currently running"
     printf '\n'
-    printf '    %sResults by category (each offers: re-scan / set aside):%s\n' "$D" "$R"
+    printf '    %sResults by category (just lists them):%s\n' "$D" "$R"
     printf '    %s%-15s%s %s\n' "$B" "nexv match"     "$R" "Servers whose password was found"
     printf '    %s%-15s%s %s\n' "$B" "nexv none"      "$R" "Searched fully, no password matched"
     printf '    %s%-15s%s %s\n' "$B" "nexv timeout"   "$R" "Could not connect (timeout / reset)"
     printf '    %s%-15s%s %s\n' "$B" "nexv notdone"   "$R" "Still running / not finished yet"
+    printf '    %sThen act if you want: %snexv timeout start%s%s (re-scan) · %snexv timeout stop%s%s (set aside)%s\n' "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$R"
     printf '\n'
     printf '    %s%-15s%s %s\n' "$B" "nexv update"    "$R" "Update to the latest version from GitHub"
     printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
@@ -186,7 +187,7 @@ case "${1:-}" in
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" status
         ;;
     match|matched|none|nomatch|notfound|timeout|timedout|unreachable|failed|notdone|more|pending|running)
-        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" "$1"
+        exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" "$@"
         ;;
     stop|kill)
         # Stop the running nexv scan (progress is saved; resume with 'nexv continue').
