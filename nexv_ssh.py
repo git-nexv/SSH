@@ -1643,6 +1643,9 @@ def run_category(cat, action=None):
     if not hosts:
         log(C.DIM + "  (none)" + C.END)
         return
+    if cat == "match":
+        log("  {:<18} {:<6} {:<14} {}".format("IP", "PORT", "USERNAME", "PASSWORD"))
+        log("  {:<18} {:<6} {:<14} {}".format("-" * 16, "-" * 4, "-" * 12, "-" * 20))
     for ip in hosts:
         r = recs.get(ip) or {}
         if cat == "match":

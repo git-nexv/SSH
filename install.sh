@@ -108,69 +108,49 @@ _sudo=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then _sudo="sudo"; fi
 
 show_help() {
-    local C B D R    # cyan, bold, dim, reset
-    if [ -t 1 ]; then C=$'\033[96m'; B=$'\033[1m'; D=$'\033[2m'; R=$'\033[0m';
-    else C=''; B=''; D=''; R=''; fi
-    local line="────────────────────────────────────────────────────────"
+    local G R W bar
+    if [ -t 1 ]; then G=$'\033[92m'; R=$'\033[0m'; else G=''; R=''; fi
+    W=62
+    printf -v bar '%*s' $((W + 2)) ''
+    bar=${bar// /═}
+    _r() { printf '%s║%s %-'"$W"'s %s║%s\n' "$G" "$R" "$1" "$G" "$R"; }
 
     printf '\n'
-    printf '  %s%snexv%s  ·  SSH credential finder\n' "$C" "$B" "$R"
-    printf '  %sFind which password opens which of your SSH servers.%s\n\n' "$D" "$R"
-
-    printf '  %s%sCOMMANDS%s\n' "$C" "$B" "$R"
-    printf '  %s%s%s\n' "$D" "$line" "$R"
-    printf '    %s%-15s%s %s\n' "$B" "nexv start"     "$R" "Start a new scan (asks the questions below)"
-    printf '    %s%-15s%s %s\n' "$B" "nexv continue"  "$R" "Resume an interrupted scan where it stopped"
-    printf '    %s%-15s%s %s\n' "$B" "nexv status"    "$R" "Watch the running scan live (full screen)"
-    printf '    %s%-15s%s %s\n' "$B" "nexv retry"     "$R" "Re-try the servers that errored (works mid-scan)"
-    printf '    %s%-15s%s %s\n' "$B" "nexv stop"      "$R" "Stop a scan that is currently running"
+    printf '%s╔%s╗%s\n' "$G" "$bar" "$R"
+    _r "nexv  -  SSH credential finder"
+    _r "find which password opens which of your SSH servers"
+    printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
+    _r "COMMANDS"
+    _r "  nexv start        start a new scan"
+    _r "  nexv status       watch the running scan live (full screen)"
+    _r "  nexv continue     resume an interrupted scan"
+    _r "  nexv retry        re-try the servers that errored"
+    _r "  nexv stop         stop the running scan"
+    _r "  nexv update       update to the latest version"
+    _r "  nexv uninstall    remove nexv from this machine"
+    _r "  nexv help         show this menu"
+    printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
+    _r "RESULT LISTS   (just list them)"
+    _r "  nexv match        found servers (shows the password)"
+    _r "  nexv none         searched fully, no password matched"
+    _r "  nexv timeout      could not connect (timeout / reset)"
+    _r "  nexv notdone      still running / not finished yet"
+    _r "  nexv <list> start   re-scan that group"
+    _r "  nexv <list> stop    set that group aside (ignore it)"
+    printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
+    _r "nexv start asks:"
+    _r "  port(s), username or file, IP file, password file,"
+    _r "  how many IPs this run, how many at once, retries"
+    _r "  finished IPs are removed from ip.txt (batches)"
+    printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
+    _r "FILES   ip.txt   password.txt   users.txt (optional)"
+    _r "SPEED   NEXV_TIMEOUT   NEXV_PROBE   NEXV_DELAY"
+    _r "        e.g.  NEXV_TIMEOUT=2 nexv start"
+    printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
+    _r "the scan keeps running even if you close the terminal"
+    _r "use only on servers you own or are authorized to test"
+    printf '%s╚%s╝%s\n' "$G" "$bar" "$R"
     printf '\n'
-    printf '    %sResults by category (just lists them):%s\n' "$D" "$R"
-    printf '    %s%-15s%s %s\n' "$B" "nexv match"     "$R" "Servers whose password was found"
-    printf '    %s%-15s%s %s\n' "$B" "nexv none"      "$R" "Searched fully, no password matched"
-    printf '    %s%-15s%s %s\n' "$B" "nexv timeout"   "$R" "Could not connect (timeout / reset)"
-    printf '    %s%-15s%s %s\n' "$B" "nexv notdone"   "$R" "Still running / not finished yet"
-    printf '    %sThen act if you want: %snexv timeout start%s%s (re-scan) · %snexv timeout stop%s%s (set aside)%s\n' "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$R"
-    printf '\n'
-    printf '    %s%-15s%s %s\n' "$B" "nexv update"    "$R" "Update to the latest version from GitHub"
-    printf '    %s%-15s%s %s\n' "$B" "nexv uninstall" "$R" "Remove nexv from this machine"
-    printf '    %s%-15s%s %s\n' "$B" "nexv help"      "$R" "Show this menu"
-    printf '\n'
-    printf '    %sThe scan keeps running even if you close the terminal. On the live%s\n' "$D" "$R"
-    printf '    %sscreen you can type %sretry%s%s / %sstop%s%s / %squit%s%s and press Enter, or%s\n' "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$B" "$R" "$D" "$R"
-    printf '    %sreattach any time with %snexv status%s%s.%s\n' "$D" "$B" "$R" "$D" "$R"
-    printf '\n'
-
-    printf '  %s%sWHAT "nexv start" ASKS%s\n' "$C" "$B" "$R"
-    printf '  %s%s%s\n' "$D" "$line" "$R"
-    printf '    %-22s %s\n' "SSH port(s)"        "one or more, e.g. 22 or 22 2222   (default 22)"
-    printf '    %-22s %s\n' "username / file"    "a name, or a usernames file       (default root)"
-    printf '    %-22s %s\n' "IP list file"       "one IP per line                   (ip.txt)"
-    printf '    %-22s %s\n' "password list file" "one password per line             (password.txt)"
-    printf '    %-22s %s\n' "how many IPs"       "scan only the first N this run    (default all)"
-    printf '    %-22s %s\n' "how many at once"   "parallel servers                  (default 100)"
-    printf '    %-22s %s\n' "retries"            "attempts on timeout / reset       (default 3)"
-    printf '\n'
-    printf '    %sFinished IPs (found / no-match) are removed from ip.txt, so you%s\n' "$D" "$R"
-    printf '    %scan work through a big list in batches.%s\n' "$D" "$R"
-    printf '\n'
-
-    printf '  %s%sFILES%s   %s(in the folder you run nexv from)%s\n' "$C" "$B" "$R" "$D" "$R"
-    printf '  %s%s%s\n' "$D" "$line" "$R"
-    printf '    %s%-16s%s %s\n' "$B" "ip.txt"        "$R" "one IP per line; optional IP:PORT per line"
-    printf '    %s%-16s%s %s\n' "$B" "password.txt"  "$R" "one password per line"
-    printf '    %s%-16s%s %s\n' "$B" "users.txt"     "$R" "(optional) one username per line"
-    printf '    %s%-16s%s %s\n' "$B" "nexv_results_*" "$R" "saved report, written after each scan"
-    printf '\n'
-
-    printf '  %s%sSPEED%s   %s(optional environment variables)%s\n' "$C" "$B" "$R" "$D" "$R"
-    printf '  %s%s%s\n' "$D" "$line" "$R"
-    printf '    %s%-16s%s %s\n' "$B" "NEXV_TIMEOUT"  "$R" "per-attempt timeout in seconds   (default 3)"
-    printf '    %s%-16s%s %s\n' "$B" "NEXV_PROBE"    "$R" "TCP port-probe timeout in seconds"
-    printf '    %s%-16s%s %s\n' "$B" "NEXV_DELAY"    "$R" "pause between attempts (if rate-limited)"
-    printf '    %sexample:%s NEXV_TIMEOUT=2 nexv start\n' "$D" "$R"
-    printf '\n'
-    printf '  %sUse only on servers you own or are authorized to test.%s\n\n' "$D" "$R"
 }
 
 case "${1:-}" in
