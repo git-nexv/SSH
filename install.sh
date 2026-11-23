@@ -138,6 +138,11 @@ show_help() {
     _r "  nexv <list> start   re-scan that group"
     _r "  nexv <list> stop    set that group aside (ignore it)"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
+    _r "PER-FILE MEMORY"
+    _r "  fully-tested IPs are remembered per file and skipped"
+    _r "  next time you scan that same file"
+    _r "  nexv reset <file>   forget them, test that file again"
+    printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
     _r "nexv start asks:"
     _r "  port(s), username or file, IP file, password file,"
     _r "  how many IPs this run, how many at once, retries"
@@ -166,7 +171,7 @@ case "${1:-}" in
     status|--status|-s)
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" status
         ;;
-    match|matched|none|nomatch|notfound|timeout|timedout|unreachable|failed|notdone|more|pending|running)
+    match|matched|none|nomatch|notfound|timeout|timedout|unreachable|failed|notdone|more|pending|running|reset)
         exec "$PYBIN" "$NEXV_DIR/nexv_ssh.py" "$@"
         ;;
     stop|kill)

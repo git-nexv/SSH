@@ -28,6 +28,63 @@ from datetime import datetime
 STATE_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "state.json")
 # PID of the currently running scan, so `nexv stop` can stop it precisely.
 PID_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "nexv.pid")
+# Persistent, per-IP-file blacklist of IPs that were fully tested (found / no
+# match) and should not be scanned again — until `nexv reset <file>`.
+BLACKLIST_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "blacklist.json")
+
+
+def _load_blacklist():
+    try:
+        with open(BLACKLIST_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # noqa
+        return {}
+
+
+def _save_blacklist(data):
+    try:
+        os.makedirs(os.path.dirname(BLACKLIST_PATH), exist_ok=True)
+        tmp = BLACKLIST_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, BLACKLIST_PATH)
+    except Exception:  # noqa
+        pass
+
+
+def blacklist_for(ip_file):
+    """Set of IPs blacklisted for this specific IP file."""
+    return set(_load_blacklist().get(os.path.abspath(ip_file), []))
+
+
+def add_to_blacklist(ip_file, ips):
+    if not ips:
+        return
+    data = _load_blacklist()
+    key = os.path.abspath(ip_file)
+    cur = set(data.get(key, []))
+    cur |= set(ips)
+    data[key] = sorted(cur)
+    _save_blacklist(data)
+
+
+def reset_blacklist(ip_file):
+    """Clear the blacklist for one IP file. Returns how many were cleared."""
+    data = _load_blacklist()
+    key = os.path.abspath(ip_file)
+    n = len(data.get(key, []))
+    if key in data:
+        data.pop(key, None)
+        _save_blacklist(data)
+    return n
+
+
+def blacklist_after_scan(ip_file, state):
+    """After a scan, blacklist the IPs that are fully resolved for this file
+    (password found, or all passwords tried with no match)."""
+    recs = state.data.get("ips", {})
+    done = [ip for ip, r in recs.items() if r.get("status") in ("found", "notfound")]
+    add_to_blacklist(ip_file, done)
 
 
 def _write_pid():
@@ -1231,6 +1288,21 @@ def run_fresh():
     if pw_dups:
         log(C.DIM + "Skipped {} duplicate password(s) in {}.".format(pw_dups, pw_file) + C.END)
 
+    # Skip IPs already fully tested for THIS file (persistent, per-file blacklist).
+    bl = blacklist_for(ip_file)
+    if bl:
+        before = len(all_ips)
+        all_ips = [ip for ip in all_ips if ip not in bl]
+        skipped_bl = before - len(all_ips)
+        if skipped_bl:
+            log(C.DIM + "Skipped {} already-tested IP(s) for {} "
+                "(run 'nexv reset {}' to test them again).".format(
+                    skipped_bl, os.path.basename(ip_file), ip_file) + C.END)
+    if not all_ips:
+        log(C.G + "All IPs in {} are already fully tested.".format(ip_file) + C.END)
+        log("Use " + C.BOLD + "nexv reset {}".format(ip_file) + C.END + " to test them again.")
+        sys.exit(0)
+
     # How MANY IPs from the file to scan this run (take the first N). This lets
     # you work through a big list in batches; the rest stay untouched.
     total_ips = len(all_ips)
@@ -1260,26 +1332,6 @@ def run_fresh():
         "How many retries when a server times out / won't connect", RETRIES,
         lo=0, hi=20)
 
-    # If a previous scan tested some of these IPs (with passwords), offer to skip
-    # them. 'tested' means we reached a verdict (found / no match); servers that
-    # were only unreachable are NOT counted as tested and will be tried again.
-    history = {}
-    prev = State()
-    if prev.exists():
-        try:
-            prev.load()
-            history = prev.data.get("ips", {})
-        except Exception:  # noqa
-            history = {}
-    tested = [ip for ip in ips
-              if history.get(ip, {}).get("status") in ("found", "notfound")]
-    skip = set()
-    if tested:
-        ans = ask("Re-test the {} IP(s) already tested in a previous scan? (y/n)".format(
-            len(tested)), "n").lower()
-        if ans not in ("y", "yes"):
-            skip = set(tested)
-
     state = State()
     state.init_fresh({
         "ports": default_ports,
@@ -1289,27 +1341,17 @@ def run_fresh():
         "workers": workers,
         "retries": RETRIES,
         # The exact batch scanned this run, so continue/status/retry use the same
-        # set even if ip.txt changes (we also prune finished IPs from the file).
+        # set even if ip.txt changes.
         "scan_ips": ips,
         "portmap": {ip: portlists[ip] for ip in ips},
     })
-    # Carry forward results for the IPs we're skipping, so they appear in the
-    # report and are not scanned again.
-    for ip in skip:
-        rec = history[ip]
-        if rec.get("status") == "found":
-            state.set_done(ip, "found", port=rec.get("port"),
-                           username=rec.get("username", "root"),
-                           password=rec.get("password", ""))
-        else:
-            state.set_done(ip, "notfound", port=rec.get("port"))
 
     results, elapsed = do_scan(default_ports, portlists, usernames, ips, passwords, state,
                               resume=False, workers=workers)
     if results is None:
         return                       # detached to background; parent is done
     report(default_ports, portlists, usernames, ips, results, elapsed)
-    prune_ipfile(os.path.abspath(ip_file), state)
+    blacklist_after_scan(os.path.abspath(ip_file), state)
 
 
 def _load_saved_scan():
@@ -1363,39 +1405,6 @@ def _load_saved_scan():
     return state, default_ports, portlists, usernames, ips, passwords, workers
 
 
-def prune_ipfile(ip_file, state):
-    """Remove fully-checked IPs (found / no-match) from the IP file, so the file
-    shrinks to the servers that still need work. Unreachable and untouched IPs
-    are kept."""
-    try:
-        recs = state.data.get("ips", {})
-        done = {ip for ip, r in recs.items() if r.get("status") in ("found", "notfound")}
-        if not done or not os.path.isfile(ip_file):
-            return
-        with open(ip_file, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
-        kept = []
-        removed = 0
-        for line in lines:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                kept.append(line)
-                continue
-            ip, _ = parse_endpoint(s)
-            if ip in done:
-                removed += 1
-                continue
-            kept.append(line)
-        if removed:
-            tmp = ip_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.writelines(kept)
-            os.replace(tmp, ip_file)
-            log(C.DIM + "Removed {} finished IP(s) from {}.".format(removed, ip_file) + C.END)
-    except Exception:  # noqa
-        pass
-
-
 def run_resume():
     """Resume an interrupted scan from the saved progress file."""
     state, default_ports, portlists, usernames, ips, passwords, workers = _load_saved_scan()
@@ -1405,7 +1414,7 @@ def run_resume():
     if results is None:
         return
     report(default_ports, portlists, usernames, ips, results, elapsed)
-    prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
+    blacklist_after_scan(state.config().get("ip_file", "ip.txt"), state)
 
 
 def run_retry():
@@ -1446,7 +1455,7 @@ def run_retry():
     if results is None:
         return                       # detached to background; survives terminal close
     report(default_ports, portlists, usernames, ips, results, elapsed)
-    prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
+    blacklist_after_scan(state.config().get("ip_file", "ip.txt"), state)
 
 
 def _scan_running():
@@ -1679,7 +1688,7 @@ def run_category(cat, action=None):
         if results is None:
             return
         report(default_ports, portlists, usernames, ips, results, elapsed)
-        prune_ipfile(state.config().get("ip_file", "ip.txt"), state)
+        blacklist_after_scan(state.config().get("ip_file", "ip.txt"), state)
     elif action in ("stop", "aside", "skip"):
         for ip in hosts:
             state.set_done(ip, "skipped")
@@ -1688,11 +1697,38 @@ def run_category(cat, action=None):
         log(C.Y + "Unknown action '{}'. Use: start  or  stop".format(action) + C.END)
 
 
+def run_reset(ip_file=None):
+    """Clear the per-file blacklist so a file's IPs get tested again next scan."""
+    if not ip_file:
+        # Default to the last scanned file.
+        state = State()
+        if state.exists():
+            try:
+                state.load()
+                ip_file = state.config().get("ip_file")
+            except Exception:  # noqa
+                ip_file = None
+    if not ip_file:
+        log(C.Y + "Usage: " + C.BOLD + "nexv reset <ip-file>" + C.END
+            + C.Y + "   (e.g. nexv reset ip1.txt)" + C.END)
+        return
+    n = reset_blacklist(ip_file)
+    if n:
+        log(C.G + "Reset {}: {} IP(s) will be tested again next scan.".format(
+            os.path.basename(ip_file), n) + C.END)
+    else:
+        log(C.DIM + "Nothing to reset for {} (no blacklisted IPs).".format(
+            os.path.basename(ip_file)) + C.END)
+
+
 def main():
     banner()
     arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
     arg2 = sys.argv[2].lower() if len(sys.argv) > 2 else None
-    if arg in ("continue", "--continue", "-c", "resume", "--resume"):
+    arg2_raw = sys.argv[2] if len(sys.argv) > 2 else None   # keep case for file paths
+    if arg in ("reset", "--reset"):
+        run_reset(arg2_raw)
+    elif arg in ("continue", "--continue", "-c", "resume", "--resume"):
         run_resume()
     elif arg in ("retry", "--retry", "-r"):
         run_retry()

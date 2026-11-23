@@ -180,10 +180,22 @@ For `none`, `timeout` and `notdone` it then asks what to do with that group:
 - **stop** — set them aside so future scans ignore them
 - **n** — do nothing
 
-A server that has been **fully tested** (every username × password tried) is kept
-aside automatically and never scanned again. Finished IPs (found / no-match) are
-also **removed from `ip.txt`** after the scan, so the file shrinks to the servers
-that still need work (unreachable and untouched IPs stay).
+### Per-file memory (blacklist)
+
+When an IP in a file is **fully tested** (password found, or every password tried
+with no match), nexv remembers it **for that file**. Next time you scan the same
+file, those IPs are skipped automatically — so you never re-test the same servers.
+
+The memory is **per file**: an IP that is done for `ip1.txt` is still tested if it
+also appears in `ip2.txt` (they're independent lists).
+
+To test a file's IPs again from scratch, clear its memory:
+
+```bash
+nexv reset ip1.txt
+```
+
+(Unreachable / untouched IPs are **not** blacklisted — they'll be tried again.)
 
 ## Big lists stay stable
 
