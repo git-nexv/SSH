@@ -26,10 +26,10 @@ from datetime import datetime
 # Where scan progress is saved so an interrupted run can be resumed with
 # `nexv-ssh continue`.
 STATE_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "state.json")
-# PID of the currently running scan, so `nexv stop` can stop it precisely.
+# PID of the currently running scan, so `sv stop` can stop it precisely.
 PID_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "nexv.pid")
 # Persistent, per-IP-file blacklist of IPs that were fully tested (found / no
-# match) and should not be scanned again — until `nexv reset <file>`.
+# match) and should not be scanned again — until `sv reset <file>`.
 BLACKLIST_PATH = os.path.join(os.path.expanduser("~"), ".nexv-ssh", "blacklist.json")
 
 
@@ -103,7 +103,7 @@ def _clear_pid():
         pass
 
 
-# Set when `nexv retry` sends SIGUSR1 to a running scan: triggers an extra round
+# Set when `sv retry` sends SIGUSR1 to a running scan: triggers an extra round
 # that re-tries the servers that errored.
 _RETRY_REQUEST = threading.Event()
 
@@ -210,7 +210,7 @@ if not USE_SSHPASS:
     except ImportError:
         sys.stderr.write(
             "\n[!] Neither 'sshpass' nor 'paramiko' is available.\n"
-            "    Re-run the nexv installer, or install one of:\n"
+            "    Re-run the sv installer, or install one of:\n"
             "      - sshpass + openssh-client   (recommended)\n"
             "      - pip3 install paramiko\n\n"
         )
@@ -565,7 +565,7 @@ def banner():
   | | | |  __/>  <  \ V /    \__ \__ \ __ |
   |_| |_|\___/_/\_\  \_/     |___/___/_||_|
 """ + C.END)
-    log(C.DIM + "        nexv  ·  SSH credential finder" + C.END)
+    log(C.DIM + "        sv  ·  SSH credential finder" + C.END)
     log(C.DIM + "        Use only on servers you own or are authorized to test." + C.END)
     log("")
 
@@ -979,11 +979,11 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
 
     confirm = ask("Start scanning? (y/n)", "y").lower()
     if confirm not in ("y", "yes"):
-        log(C.Y + "Cancelled. Progress is saved; run 'nexv continue' to resume." + C.END)
+        log(C.Y + "Cancelled. Progress is saved; run 'sv continue' to resume." + C.END)
         sys.exit(0)
 
     # Offer to run in the background so the terminal stays free for other
-    # commands (nexv status / retry / stop) while the scan runs.
+    # commands (sv status / retry / stop) while the scan runs.
     #
     # The scan ALWAYS runs detached so it survives the terminal closing. The
     # parent then either attaches a live viewer (watch) or just prints how to
@@ -1004,9 +1004,9 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
             else:
                 log("")
                 log(C.G + C.BOLD + "Scan running in the background (pid {}).".format(pid) + C.END)
-                log("  " + C.BOLD + "nexv status" + C.END + "   watch it live")
-                log("  " + C.BOLD + "nexv retry" + C.END + "    re-try the servers that errored")
-                log("  " + C.BOLD + "nexv stop" + C.END + "     stop it (progress is saved)")
+                log("  " + C.BOLD + "sv status" + C.END + "   watch it live")
+                log("  " + C.BOLD + "sv retry" + C.END + "    re-try the servers that errored")
+                log("  " + C.BOLD + "sv stop" + C.END + "     stop it (progress is saved)")
                 log(C.DIM + "  log: {}".format(SCAN_LOG) + C.END)
                 log("")
             return None, None
@@ -1041,7 +1041,7 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
                 + C.BOLD + "status" + C.END + C.DIM + " · "
                 + C.BOLD + "stop" + C.END + C.DIM + C.END)
         else:
-            log(C.DIM + "Scanning... (progress saved; resume with 'nexv continue')" + C.END)
+            log(C.DIM + "Scanning... (progress saved; resume with 'sv continue')" + C.END)
         log("")
 
     started = datetime.now()
@@ -1051,18 +1051,20 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
     progress.failed = fail_count
     progress.start_timer()
 
-    # `nexv retry` / `nexv stop` (from any terminal) reach this scan via signals.
+    # `sv retry` / `sv stop` (from any terminal) reach this scan via signals.
     _RETRY_REQUEST.clear()
     _QUIT_REQUEST.clear()
     try:
-        signal.signal(signal.SIGUSR1, _on_retry_signal)      # nexv retry
-        signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # nexv stop -> clean exit
+        signal.signal(signal.SIGUSR1, _on_retry_signal)      # sv retry
+        signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # sv stop -> clean exit
     except Exception:  # noqa (not main thread / unsupported)
         pass
 
     def handle_cmd(cmd):
         c = cmd.lower().strip()
-        if c.startswith("nexv "):
+        if c.startswith("sv "):
+            c = c[3:].strip()
+        elif c.startswith("nexv "):
             c = c[5:].strip()
         if c in ("retry", "r"):
             _RETRY_REQUEST.set()
@@ -1088,7 +1090,7 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
 
     def requeue_failed(queue):
         """Pull hosts that have errored back into the work queue (triggered by
-        `nexv retry`). Returns how many were re-queued."""
+        `sv retry`). Returns how many were re-queued."""
         failed_hosts = [h for h, r in results_by_host.items()
                         if r["status"] in ("unreachable", "error")]
         # Don't re-queue a host that is already queued or in flight.
@@ -1106,7 +1108,7 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
 
     try:
         # Dynamic scheduler: keep up to `workers` scans in flight, and whenever
-        # `nexv retry` is received, re-queue the failed servers immediately so
+        # `sv retry` is received, re-queue the failed servers immediately so
         # they are retried alongside the ongoing work (not after it).
         queue = list(pending)
         in_flight = {}
@@ -1130,7 +1132,7 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
                         progress.host_done(host, C.R + "[!] Error scanning {}: {}".format(host, e) + C.END,
                                            failed=True)
                         results_by_host[host] = {"host": host, "status": "error", "error": str(e)}
-                # A retry was requested ('r' key or `nexv retry`): re-queue the
+                # A retry was requested ('r' key or `sv retry`): re-queue the
                 # failed servers right away.
                 if _RETRY_REQUEST.is_set():
                     _RETRY_REQUEST.clear()
@@ -1139,9 +1141,9 @@ def do_scan(default_ports, portlists, usernames, ips, passwords, state,
                         progress.emit(C.Y + "↻ Retry: re-trying {} failed server(s)...".format(n) + C.END)
                     else:
                         progress.emit(C.DIM + "↻ Retry: no failed servers to re-try right now." + C.END)
-                # Stop requested (typed 'stop' or `nexv stop`): drain and exit.
+                # Stop requested (typed 'stop' or `sv stop`): drain and exit.
                 if _QUIT_REQUEST.is_set() and queue:
-                    progress.emit(C.Y + "■ Stopping... (progress saved; resume with 'nexv continue')" + C.END)
+                    progress.emit(C.Y + "■ Stopping... (progress saved; resume with 'sv continue')" + C.END)
                     queue.clear()
                 fill()
     finally:
@@ -1208,10 +1210,10 @@ def report(default_ports, portlists, usernames, ips, results, elapsed):
 
     # ------------------------- save results ------------------------------
     now = datetime.now()
-    out_path = "nexv_results_{}.txt".format(now.strftime("%Y%m%d_%H%M%S"))
+    out_path = "sv_results_{}.txt".format(now.strftime("%Y%m%d_%H%M%S"))
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write("nexv-ssh results  -  {}\n".format(now.isoformat()))
+            fh.write("sv results  -  {}\n".format(now.isoformat()))
             fh.write("ports={}  usernames={}\n\n".format(
                 " ".join(str(p) for p in default_ports), ",".join(usernames)))
             fh.write("# MATCHED (ip | port | username | password)\n")
@@ -1296,11 +1298,11 @@ def run_fresh():
         skipped_bl = before - len(all_ips)
         if skipped_bl:
             log(C.DIM + "Skipped {} already-tested IP(s) for {} "
-                "(run 'nexv reset {}' to test them again).".format(
+                "(run 'sv reset {}' to test them again).".format(
                     skipped_bl, os.path.basename(ip_file), ip_file) + C.END)
     if not all_ips:
         log(C.G + "All IPs in {} are already fully tested.".format(ip_file) + C.END)
-        log("Use " + C.BOLD + "nexv reset {}".format(ip_file) + C.END + " to test them again.")
+        log("Use " + C.BOLD + "sv reset {}".format(ip_file) + C.END + " to test them again.")
         sys.exit(0)
 
     # How MANY IPs from the file to scan this run (take the first N). This lets
@@ -1361,7 +1363,7 @@ def _load_saved_scan():
     state = State()
     if not state.exists():
         log(C.Y + "[!] No saved progress found." + C.END)
-        log("    Start a new scan first with:  " + C.BOLD + "nexv start" + C.END)
+        log("    Start a new scan first with:  " + C.BOLD + "sv start" + C.END)
         sys.exit(1)
     try:
         state.load()
@@ -1381,7 +1383,7 @@ def _load_saved_scan():
 
     if not os.path.isfile(pw_file):
         log(C.R + "[!] Password file no longer exists: {}".format(pw_file) + C.END)
-        log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv start" + C.END)
+        log("    Put it back, or start a fresh scan with: " + C.BOLD + "sv start" + C.END)
         sys.exit(1)
     passwords, _ = load_lines(pw_file)
 
@@ -1395,7 +1397,7 @@ def _load_saved_scan():
     else:
         if not os.path.isfile(ip_file):
             log(C.R + "[!] IP file no longer exists: {}".format(ip_file) + C.END)
-            log("    Put it back, or start a fresh scan with: " + C.BOLD + "nexv start" + C.END)
+            log("    Put it back, or start a fresh scan with: " + C.BOLD + "sv start" + C.END)
             sys.exit(1)
         raw_ips, _ = load_lines(ip_file)
         ips, portlists, _ = build_targets(raw_ips, default_ports)
@@ -1484,8 +1486,8 @@ def _results_from_state(recs, ips):
 def run_viewer(default_ports, portlists, usernames, ips, passwords):
     """Live full-screen view of the running (or last) scan, read from the saved
     state — shows every server being checked and the password being tried, and
-    lets you type retry / stop / quit. Used by `nexv status` and by a foreground
-    `nexv start` (the scan itself always runs detached)."""
+    lets you type retry / stop / quit. Used by `sv status` and by a foreground
+    `sv start` (the scan itself always runs detached)."""
     creds = [(u, p) for u in usernames for p in passwords]
     state = State()
 
@@ -1512,7 +1514,9 @@ def run_viewer(default_ports, portlists, usernames, ips, passwords):
 
     def handle_cmd(cmd):
         c = cmd.lower().strip()
-        if c.startswith("nexv "):
+        if c.startswith("sv "):
+            c = c[3:].strip()
+        elif c.startswith("nexv "):
             c = c[5:].strip()
         pid = _scan_running()
         if c in ("retry", "r"):
@@ -1609,8 +1613,8 @@ def run_viewer(default_ports, portlists, usernames, ips, passwords):
                 C.CY, r["host"], C.END, r.get("port") or default_ports[0],
                 r.get("username", "root"), C.G, r.get("password", ""), C.END))
     if _scan_running():
-        log(C.DIM + "Scan still running — 'nexv status' to keep watching, "
-            "'nexv timeout' / 'nexv notdone' for full lists." + C.END)
+        log(C.DIM + "Scan still running — 'sv status' to keep watching, "
+            "'sv timeout' / 'sv notdone' for full lists." + C.END)
     elif quit_flag.is_set():
         log(C.DIM + "Stopped watching. The scan continues if it was running." + C.END)
 
@@ -1619,7 +1623,7 @@ def run_status():
     """Attach a live viewer to the current (or last) scan."""
     state = State()
     if not state.exists():
-        log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "nexv start" + C.END)
+        log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "sv start" + C.END)
         return
     _, default_ports, portlists, usernames, ips, passwords, _ = _load_saved_scan()
     run_viewer(default_ports, portlists, usernames, ips, passwords)
@@ -1639,7 +1643,7 @@ def run_category(cat, action=None):
     (start) or set them aside (stop); without an action, just list."""
     state = State()
     if not state.exists():
-        log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "nexv start" + C.END)
+        log(C.Y + "No scan found yet. Start one with: " + C.BOLD + "sv start" + C.END)
         return
     state, default_ports, portlists, usernames, ips, passwords, workers = _load_saved_scan()
     recs = state.data.get("ips", {})
@@ -1672,8 +1676,8 @@ def run_category(cat, action=None):
     # No action given: just list, and (for actionable groups) show how to act.
     if not action:
         if cat != "match":
-            log(C.DIM + "To act on these: {}nexv {} start{}{} (re-scan) · "
-                "{}nexv {} stop{}{} (set aside)".format(
+            log(C.DIM + "To act on these: {}sv {} start{}{} (re-scan) · "
+                "{}sv {} stop{}{} (set aside)".format(
                     C.BOLD, cat, C.END, C.DIM, C.BOLD, cat, C.END, C.DIM) + C.END)
         return
 
@@ -1709,8 +1713,8 @@ def run_reset(ip_file=None):
             except Exception:  # noqa
                 ip_file = None
     if not ip_file:
-        log(C.Y + "Usage: " + C.BOLD + "nexv reset <ip-file>" + C.END
-            + C.Y + "   (e.g. nexv reset ip1.txt)" + C.END)
+        log(C.Y + "Usage: " + C.BOLD + "sv reset <ip-file>" + C.END
+            + C.Y + "   (e.g. sv reset ip1.txt)" + C.END)
         return
     n = reset_blacklist(ip_file)
     if n:

@@ -1,4 +1,4 @@
-# nexv
+# sv
 
 A small Linux terminal tool that finds **which password opens which of your SSH servers**.
 
@@ -21,7 +21,7 @@ on each one" situation.
 curl -fsSL https://raw.githubusercontent.com/git-nexv/SSH/main/install.sh | bash
 ```
 
-This installs the engine and registers the command `nexv`.
+This installs the engine and registers the command `sv`.
 
 ---
 
@@ -48,7 +48,7 @@ This installs the engine and registers the command `nexv`.
 2. Start a scan:
 
    ```bash
-   nexv start
+   sv start
    ```
 
 3. It will ask you:
@@ -92,7 +92,7 @@ This installs the engine and registers the command `nexv`.
      8.8.8.8 (timeout)
    ```
 
-   The results are also saved to a file named `nexv_results_<date>.txt`.
+   The results are also saved to a file named `sv_results_<date>.txt`.
 
 ---
 
@@ -103,7 +103,7 @@ If your SSH session drops, the server reboots, or you close the terminal in the
 middle of a scan, just reopen the terminal and run:
 
 ```bash
-nexv continue
+sv continue
 ```
 
 It first reprints everything from the previous run (matches, no-matches and
@@ -115,14 +115,14 @@ connection attempts were made, e.g. `(rate-limited? ..., 6 tries)`.
 ## Commands
 
 ```bash
-nexv start       # start a new scan
-nexv status      # show progress + matches of the running/last scan
-nexv continue    # resume an interrupted scan
-nexv retry       # re-try the servers that errored
-nexv stop        # stop a scan that is currently running
-nexv update      # pull the latest version from GitHub
-nexv uninstall   # remove nexv from this machine
-nexv help        # show the full menu
+sv start       # start a new scan
+sv status      # show progress + matches of the running/last scan
+sv continue    # resume an interrupted scan
+sv retry       # re-try the servers that errored
+sv stop        # stop a scan that is currently running
+sv update      # pull the latest version from GitHub
+sv uninstall   # remove sv from this machine
+sv help        # show the full menu
 ```
 
 ### The scan always keeps running after you close the terminal
@@ -132,11 +132,11 @@ dropping your SSH session never stops it. When you start a scan it asks
 **"Watch the scan live now?"**:
 
 - **yes** — you get the live full-screen view right away (and can type commands).
-- **no** — it just runs; reattach any time with `nexv status`.
+- **no** — it just runs; reattach any time with `sv status`.
 
-`nexv status` re-opens that same live full-screen view of the running scan — every
+`sv status` re-opens that same live full-screen view of the running scan — every
 server being checked, the password being tried, and the matches found so far. If
-you run `nexv retry`, the servers it re-tries reappear among the ones being
+you run `sv retry`, the servers it re-tries reappear among the ones being
 scanned on that screen. Press Ctrl-C (or type `quit`) to stop watching **without**
 stopping the scan.
 
@@ -154,23 +154,23 @@ On the live screen there is a command line at the bottom:
 Type a command there and press Enter — it does **not** erase your typing:
 
 - `retry` — re-try the servers that errored (right now, alongside the scan)
-- `stop`  — stop the scan (progress is saved; resume with `nexv continue`)
+- `stop`  — stop the scan (progress is saved; resume with `sv continue`)
 - `quit`  — stop watching, but let the scan keep running
 
-You can also drive it from any other terminal with `nexv retry` / `nexv stop`.
+You can also drive it from any other terminal with `sv retry` / `sv stop`.
 Full output of each scan is also written to `~/.nexv-ssh/scan.log`.
 
-**`nexv retry`** re-tries the servers that failed (connection reset / timeout /
+**`sv retry`** re-tries the servers that failed (connection reset / timeout /
 refused) without disturbing the ones already done — the retried servers reappear
 among the ones being scanned on the live screen.
 
 ## See and act on results by category
 
 ```bash
-nexv match      # servers whose password was found
-nexv none       # searched fully, no password matched
-nexv timeout    # could not connect (timeout / reset / refused)
-nexv notdone    # still running or not started yet
+sv match      # servers whose password was found
+sv none       # searched fully, no password matched
+sv timeout    # could not connect (timeout / reset / refused)
+sv notdone    # still running or not started yet
 ```
 
 For `none`, `timeout` and `notdone` it then asks what to do with that group:
@@ -183,7 +183,7 @@ For `none`, `timeout` and `notdone` it then asks what to do with that group:
 ### Per-file memory (blacklist)
 
 When an IP in a file is **fully tested** (password found, or every password tried
-with no match), nexv remembers it **for that file**. Next time you scan the same
+with no match), sv remembers it **for that file**. Next time you scan the same
 file, those IPs are skipped automatically — so you never re-test the same servers.
 
 The memory is **per file**: an IP that is done for `ip1.txt` is still tested if it
@@ -192,7 +192,7 @@ also appears in `ip2.txt` (they're independent lists).
 To test a file's IPs again from scratch, clear its memory:
 
 ```bash
-nexv reset ip1.txt
+sv reset ip1.txt
 ```
 
 (Unreachable / untouched IPs are **not** blacklisted — they'll be tried again.)
@@ -238,7 +238,7 @@ on every password, and live servers usually answer each password in well under a
 second.
 
 The number of servers scanned in parallel is asked as the last question when
-you run `nexv start` (higher = faster; as each server finishes, the next starts).
+you run `sv start` (higher = faster; as each server finishes, the next starts).
 
 Other settings via environment variables:
 
@@ -253,7 +253,7 @@ Other settings via environment variables:
 Example (very fast, aggressive timeouts):
 
 ```bash
-NEXV_TIMEOUT=3 NEXV_PROBE=1 nexv start
+NEXV_TIMEOUT=3 NEXV_PROBE=1 sv start
 ```
 
 > Lower timeouts are faster but, on distant/high-latency servers, can miss a
@@ -271,7 +271,7 @@ handshake — the classic sign of rate-limiting (`MaxStartups`, `fail2ban`, or a
 firewall) because too many connections came too fast. Fixes:
 
 - **Lower the parallel count** when it asks (try `5`–`10` instead of all at once).
-- **Add a delay** between attempts: `NEXV_DELAY=1 nexv start`.
+- **Add a delay** between attempts: `NEXV_DELAY=1 sv start`.
 - The tool already retries these errors a few times with backoff (`NEXV_RETRIES`).
 
 Some VPS providers also throttle outbound SSH from *your* server when it opens
@@ -289,6 +289,8 @@ down, or its SSH port is not the one you entered.
 ## Uninstall
 
 ```bash
-sudo rm -f /usr/local/bin/nexv ~/.local/bin/nexv
+sv uninstall
+# or manually:
+sudo rm -f /usr/local/bin/sv ~/.local/bin/sv
 rm -rf ~/.nexv-ssh
 ```

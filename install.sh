@@ -11,7 +11,7 @@ REPO_URL="https://github.com/git-nexv/SSH.git"
 RAW_PY="https://raw.githubusercontent.com/git-nexv/SSH/main/nexv_ssh.py"
 INSTALL_DIR="${HOME}/.nexv-ssh"
 BIN_DIR="/usr/local/bin"
-CMD_NAME="nexv"
+CMD_NAME="sv"
 
 GREEN='\033[92m'; YELLOW='\033[93m'; RED='\033[91m'; BOLD='\033[1m'; END='\033[0m'
 say()  { echo -e "${GREEN}[*]${END} $*"; }
@@ -28,7 +28,7 @@ if [ "$(id -u)" -ne 0 ]; then
     fi
 fi
 
-say "Installing nexv ..."
+say "Installing sv ..."
 
 # ---- install python3 + pip + git ------------------------------------------
 install_deps() {
@@ -117,40 +117,40 @@ show_help() {
 
     printf '\n'
     printf '%s╔%s╗%s\n' "$G" "$bar" "$R"
-    _r "nexv  -  SSH credential finder"
+    _r "sv  -  SSH credential finder"
     _r "find which password opens which of your SSH servers"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
     _r "COMMANDS"
-    _r "  nexv start        start a new scan"
-    _r "  nexv status       watch the running scan live (full screen)"
-    _r "  nexv continue     resume an interrupted scan"
-    _r "  nexv retry        re-try the servers that errored"
-    _r "  nexv stop         stop the running scan"
-    _r "  nexv update       update to the latest version"
-    _r "  nexv uninstall    remove nexv from this machine"
-    _r "  nexv help         show this menu"
+    _r "  sv start        start a new scan"
+    _r "  sv status       watch the running scan live (full screen)"
+    _r "  sv continue     resume an interrupted scan"
+    _r "  sv retry        re-try the servers that errored"
+    _r "  sv stop         stop the running scan"
+    _r "  sv update       update to the latest version"
+    _r "  sv uninstall    remove sv from this machine"
+    _r "  sv help         show this menu"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
     _r "RESULT LISTS   (just list them)"
-    _r "  nexv match        found servers (shows the password)"
-    _r "  nexv none         searched fully, no password matched"
-    _r "  nexv timeout      could not connect (timeout / reset)"
-    _r "  nexv notdone      still running / not finished yet"
-    _r "  nexv <list> start   re-scan that group"
-    _r "  nexv <list> stop    set that group aside (ignore it)"
+    _r "  sv match        found servers (shows the password)"
+    _r "  sv none         searched fully, no password matched"
+    _r "  sv timeout      could not connect (timeout / reset)"
+    _r "  sv notdone      still running / not finished yet"
+    _r "  sv <list> start   re-scan that group"
+    _r "  sv <list> stop    set that group aside (ignore it)"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
     _r "PER-FILE MEMORY"
     _r "  fully-tested IPs are remembered per file and skipped"
     _r "  next time you scan that same file"
-    _r "  nexv reset <file>   forget them, test that file again"
+    _r "  sv reset <file>   forget them, test that file again"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
-    _r "nexv start asks:"
+    _r "sv start asks:"
     _r "  port(s), username or file, IP file, password file,"
     _r "  how many IPs this run, how many at once, retries"
-    _r "  finished IPs are removed from ip.txt (batches)"
+    _r "  done IPs are remembered per file (sv reset clears)"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
     _r "FILES   ip.txt   password.txt   users.txt (optional)"
     _r "SPEED   NEXV_TIMEOUT   NEXV_PROBE   NEXV_DELAY"
-    _r "        e.g.  NEXV_TIMEOUT=2 nexv start"
+    _r "        e.g.  NEXV_TIMEOUT=2 sv start"
     printf '%s╠%s╣%s\n' "$G" "$bar" "$R"
     _r "the scan keeps running even if you close the terminal"
     _r "use only on servers you own or are authorized to test"
@@ -179,15 +179,15 @@ case "${1:-}" in
         pidf="$NEXV_DIR/nexv.pid"
         if [ -f "$pidf" ] && kill "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
             rm -f "$pidf"
-            echo "[*] Stopped the running nexv scan. Resume later with: nexv continue"
+            echo "[*] Stopped the running sv scan. Resume later with: sv continue"
         else
             rm -f "$pidf" 2>/dev/null
-            echo "[*] No running nexv scan was found."
+            echo "[*] No running sv scan was found."
         fi
         exit 0
         ;;
     update|--update|-u)
-        echo "[*] Updating nexv ..."
+        echo "[*] Updating sv ..."
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "$INSTALL_URL" | bash
         else
@@ -196,12 +196,12 @@ case "${1:-}" in
         exit $?
         ;;
     uninstall|remove|--uninstall|--remove)
-        echo "[*] Uninstalling nexv ..."
-        $_sudo rm -f /usr/local/bin/nexv /usr/local/bin/nexv-ssh 2>/dev/null \
-            || rm -f /usr/local/bin/nexv /usr/local/bin/nexv-ssh 2>/dev/null
-        rm -f "$HOME/.local/bin/nexv" "$HOME/.local/bin/nexv-ssh" 2>/dev/null
+        echo "[*] Uninstalling sv ..."
+        $_sudo rm -f /usr/local/bin/sv /usr/local/bin/nexv /usr/local/bin/nexv-ssh 2>/dev/null \
+            || rm -f /usr/local/bin/sv /usr/local/bin/nexv /usr/local/bin/nexv-ssh 2>/dev/null
+        rm -f "$HOME/.local/bin/sv" "$HOME/.local/bin/nexv" "$HOME/.local/bin/nexv-ssh" 2>/dev/null
         rm -rf "$NEXV_DIR"
-        echo "[*] Done. nexv has been removed."
+        echo "[*] Done. sv has been removed."
         exit 0
         ;;
     help|--help|-h|"")
@@ -218,9 +218,9 @@ esac
 EOF
 chmod +x "$LAUNCHER"
 
-# Remove any old 'nexv-ssh' command from the previous naming.
-$SUDO rm -f "$BIN_DIR/nexv-ssh" 2>/dev/null || true
-rm -f "$HOME/.local/bin/nexv-ssh" 2>/dev/null || true
+# Remove old command names from previous naming (nexv, nexv-ssh).
+$SUDO rm -f "$BIN_DIR/nexv" "$BIN_DIR/nexv-ssh" 2>/dev/null || true
+rm -f "$HOME/.local/bin/nexv" "$HOME/.local/bin/nexv-ssh" 2>/dev/null || true
 
 if [ -w "$BIN_DIR" ] || [ -n "$SUDO" ]; then
     $SUDO ln -sf "$LAUNCHER" "$BIN_DIR/$CMD_NAME"
@@ -238,11 +238,11 @@ fi
 echo ""
 say "${BOLD}Done!${END} Installed as: ${BOLD}${CMD_NAME}${END}  (${TARGET})"
 echo ""
-echo -e "Start a scan:   ${BOLD}nexv start${END}"
+echo -e "Start a scan:   ${BOLD}sv start${END}"
 echo "It will ask for: SSH port, username, IP file, password file, parallel count."
 echo ""
 echo "Other commands:"
-echo -e "  ${BOLD}nexv continue${END}    resume an interrupted scan"
-echo -e "  ${BOLD}nexv update${END}      update to the latest version"
-echo -e "  ${BOLD}nexv uninstall${END}   remove nexv"
+echo -e "  ${BOLD}sv continue${END}    resume an interrupted scan"
+echo -e "  ${BOLD}sv update${END}      update to the latest version"
+echo -e "  ${BOLD}sv uninstall${END}   remove sv"
 echo ""
